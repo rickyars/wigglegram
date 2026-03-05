@@ -1,0 +1,869 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>wiggle gram</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@300;400;600&display=swap');
+
+  :root {
+    --bg: #070707;
+    --surface: #0f0f0f;
+    --border: #1e1e1e;
+    --border-active: #2e2e2e;
+    --green: #39ff84;
+    --green-dim: #1a7a3e;
+    --amber: #ffb830;
+    --red: #ff3b3b;
+    --text: #c8c8c8;
+    --text-dim: #555;
+    --text-bright: #f0f0f0;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'IBM Plex Mono', 'Courier New', monospace;
+    min-height: 100vh;
+    padding: 2rem;
+    font-size: 13px;
+    line-height: 1.6;
+  }
+
+  /* scanline overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent 2px,
+      rgba(0,0,0,0.06) 2px,
+      rgba(0,0,0,0.06) 4px
+    );
+    pointer-events: none;
+    z-index: 1000;
+  }
+
+  header {
+    display: flex;
+    align-items: baseline;
+    gap: 1.5rem;
+    margin-bottom: 2.5rem;
+    padding-bottom: 1rem;
+    border-bottom: 1px solid var(--border);
+  }
+
+  h1 {
+    font-size: 1.6rem;
+    font-weight: 600;
+    color: var(--green);
+    letter-spacing: 0.05em;
+    text-shadow: 0 0 20px rgba(57, 255, 132, 0.4);
+  }
+
+  .sub {
+    color: var(--text-dim);
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+  }
+
+  /* drop zone */
+  .drop-zone {
+    border: 1px dashed var(--border-active);
+    padding: 3rem 2rem;
+    text-align: center;
+    cursor: pointer;
+    transition: all 0.15s;
+    margin-bottom: 2rem;
+    position: relative;
+    color: var(--text-dim);
+    letter-spacing: 0.05em;
+  }
+  .drop-zone:hover { border-color: var(--green-dim); color: var(--text); }
+  .drop-zone.over { border-color: var(--green); color: var(--green); background: rgba(57,255,132,0.03); }
+  .drop-zone .hint { font-size: 0.7rem; margin-top: 0.5rem; color: var(--text-dim); }
+  .drop-zone input { display: none; }
+
+  /* preview grid */
+  .previews {
+    display: none;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin-bottom: 2rem;
+  }
+  .previews.visible { display: grid; }
+
+  .preview-panel {
+    border: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .preview-label {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+  }
+  .preview-panel canvas {
+    display: block;
+    width: 100%;
+    max-height: 280px;
+    object-fit: contain;
+    background: #000;
+  }
+
+  /* controls */
+  .controls {
+    border: 1px solid var(--border);
+    margin-bottom: 1.5rem;
+  }
+  .controls-header {
+    padding: 0.4rem 0.75rem;
+    font-size: 0.65rem;
+    letter-spacing: 0.12em;
+    color: var(--text-dim);
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    text-transform: uppercase;
+  }
+  .controls-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr 1fr;
+    gap: 0;
+  }
+  .ctrl {
+    padding: 0.9rem 1rem;
+    border-right: 1px solid var(--border);
+    border-bottom: 1px solid var(--border);
+  }
+  .ctrl:nth-child(3n) { border-right: none; }
+  .ctrl-label {
+    font-size: 0.65rem;
+    letter-spacing: 0.08em;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    margin-bottom: 0.4rem;
+    display: flex;
+    justify-content: space-between;
+  }
+  .ctrl-label span { color: var(--green); font-weight: 600; }
+  input[type=range] {
+    -webkit-appearance: none;
+    width: 100%;
+    height: 2px;
+    background: var(--border-active);
+    outline: none;
+    margin-top: 0.3rem;
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 10px;
+    height: 10px;
+    background: var(--green);
+    cursor: pointer;
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 10px;
+    height: 10px;
+    background: var(--green);
+    border: none;
+    cursor: pointer;
+  }
+  .ctrl-checkbox {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-top: 0.2rem;
+  }
+  input[type=checkbox] {
+    accent-color: var(--green);
+    width: 12px;
+    height: 12px;
+    cursor: pointer;
+  }
+
+  /* generate button */
+  .generate-row {
+    display: flex;
+    align-items: center;
+    gap: 1.5rem;
+  }
+  button#generateBtn {
+    background: transparent;
+    border: 1px solid var(--green);
+    color: var(--green);
+    padding: 0.6rem 1.8rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.15s;
+  }
+  button#generateBtn:hover:not(:disabled) {
+    background: var(--green);
+    color: #000;
+  }
+  button#generateBtn:disabled {
+    border-color: var(--border-active);
+    color: var(--text-dim);
+    cursor: not-allowed;
+  }
+
+  .status {
+    font-size: 0.75rem;
+    color: var(--text-dim);
+    letter-spacing: 0.06em;
+    flex: 1;
+  }
+  .status.working { color: var(--amber); }
+  .status.done { color: var(--green); }
+  .status.error { color: var(--red); }
+
+  /* progress bar */
+  .progress-track {
+    width: 100%;
+    height: 1px;
+    background: var(--border);
+    margin-top: 1rem;
+    display: none;
+  }
+  .progress-track.visible { display: block; }
+  .progress-fill {
+    height: 100%;
+    background: var(--green);
+    transition: width 0.1s;
+    box-shadow: 0 0 8px var(--green);
+  }
+
+  /* depth note */
+  .note {
+    margin-top: 2rem;
+    padding: 0.75rem 1rem;
+    border-left: 2px solid var(--border-active);
+    color: var(--text-dim);
+    font-size: 0.72rem;
+    line-height: 1.7;
+  }
+  .note a { color: var(--green-dim); text-decoration: none; }
+  .note a:hover { color: var(--green); }
+
+  @media (max-width: 600px) {
+    .controls-grid { grid-template-columns: 1fr 1fr; }
+    .ctrl:nth-child(3n) { border-right: 1px solid var(--border); }
+    .ctrl:nth-child(2n) { border-right: none; }
+    .previews.visible { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>wiggle gram</h1>
+  <div class="sub">luminance → depth → parallax → gif</div>
+</header>
+
+<div class="drop-zone" id="dropZone" onclick="document.getElementById('fileInput').click()">
+  <input type="file" id="fileInput" accept="image/*">
+  <div>drop image here or click to browse</div>
+  <div class="hint">jpg, png, webp supported</div>
+</div>
+
+<div class="previews" id="previews">
+  <div class="preview-panel">
+    <div class="preview-label">source</div>
+    <canvas id="srcCanvas"></canvas>
+  </div>
+  <div class="preview-panel">
+    <div class="preview-label"><span id="depthSourceLabel">depth map (luminance proxy)</span> <a href="#" id="clearDepth" style="display:none; color:var(--red); font-size:0.65rem; text-decoration:none; margin-left:0.5rem;" onclick="clearCustomDepth(event)">[clear]</a></div>
+    <canvas id="depthCanvas"></canvas>
+  </div>
+</div>
+
+<!-- Optional: depth map upload override -->
+<div id="depthOverride" style="display:none;">
+  <div class="controls" style="margin-bottom:1rem;">
+    <div class="controls-header">override depth map (optional)</div>
+    <div class="drop-zone" id="depthDropZone" onclick="document.getElementById('depthInput').click()" style="padding:1.5rem; margin-bottom:0; border:none; border-top:none;">
+      <input type="file" id="depthInput" accept="image/*">
+      <div>drop grayscale depth map here</div>
+      <div class="hint">must match source image dimensions</div>
+    </div>
+  </div>
+</div>
+
+<div class="controls">
+  <div class="controls-header">parameters</div>
+  <div class="controls-grid">
+    <div class="ctrl">
+      <div class="ctrl-label"><span id="shiftLabel">parallax shift</span> <span id="shiftDisp">20px</span></div>
+      <input type="range" id="shiftCtrl" min="3" max="60" value="20">
+    </div>
+    <div class="ctrl">
+      <div class="ctrl-label">frames <span id="framesDisp">8</span></div>
+      <input type="range" id="framesCtrl" min="4" max="20" step="2" value="8">
+    </div>
+    <div class="ctrl">
+      <div class="ctrl-label">frame delay <span id="delayDisp">80ms</span></div>
+      <input type="range" id="delayCtrl" min="30" max="200" step="10" value="80">
+    </div>
+    <div class="ctrl">
+      <div class="ctrl-label">depth blur <span id="blurDisp">8px</span></div>
+      <input type="range" id="blurCtrl" min="0" max="40" value="8">
+    </div>
+    <div class="ctrl">
+      <div class="ctrl-label">output width <span id="sizeDisp">800px</span></div>
+      <input type="range" id="sizeCtrl" min="200" max="3000" step="100" value="800">
+    </div>
+    <div class="ctrl">
+      <div class="ctrl-label">depth</div>
+      <div class="ctrl-checkbox">
+        <input type="checkbox" id="invertCtrl">
+        <span>invert (dark = near)</span>
+      </div>
+    </div>
+    <div class="ctrl" id="fovCtrl" style="display:none;">
+      <div class="ctrl-label">fov <span id="fovDisp">45°</span></div>
+      <input type="range" id="fovRange" min="20" max="80" value="45">
+    </div>
+    <div class="ctrl" style="grid-column: 1 / -1; border-right: none;">
+      <div class="ctrl-label" style="margin-bottom:0.6rem;">effect mode</div>
+      <div style="display:flex; gap: 2rem; flex-wrap:wrap;">
+        <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+          <input type="radio" name="mode" value="parallax" id="modeParallax" checked style="accent-color:var(--green);">
+          <span>parallax <span style="color:var(--text-dim); font-size:0.7em;">— forward mapped, near objects occlude far</span></span>
+        </label>
+        <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+          <input type="radio" name="mode" value="warp" id="modeWarp" style="accent-color:var(--amber);">
+          <span style="color:var(--amber);">warp <span style="color:var(--text-dim); font-size:0.7em;">— backward mapped, liquid stretch</span></span>
+        </label>
+        <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+          <input type="radio" name="mode" value="orbit" id="modeOrbit" style="accent-color:#7eb8ff;">
+          <span style="color:#7eb8ff;">orbit <span style="color:var(--text-dim); font-size:0.7em;">— lenticular camera sim, lateral stereo shift (best with depth map)</span></span>
+        </label>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="generate-row">
+  <button id="generateBtn" disabled onclick="generate()">generate gif</button>
+  <div class="status" id="status">load an image to begin</div>
+</div>
+
+<div class="progress-track" id="progressTrack">
+  <div class="progress-fill" id="progressFill" style="width:0%"></div>
+</div>
+
+<div class="note">
+  bright pixels = near (unless inverted). blur the depth map to reduce hard edges.
+  for a real depth map, run <a href="https://github.com/Dreamaker-MrC/Any-Resolution-Any-Geometry" target="_blank">ARAG</a> locally and supply the output via the depth override slot above.
+</div>
+
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
+<script>
+  let srcImageData = null;
+  let customDepthData = null; // optional ARAG-supplied depth
+  let customDepthFilename = null;
+  let currentDepthMap = null;
+
+  // ─── CONTROLS ───────────────────────────────────────────────────────────────
+
+  function linkRange(id, dispId, fmt) {
+    const el = document.getElementById(id);
+    const disp = document.getElementById(dispId);
+    el.addEventListener('input', () => {
+      disp.textContent = fmt(el.value);
+      if (id === 'blurCtrl' || id === 'invertCtrl') updateDepthPreview();
+    });
+  }
+
+  linkRange('framesCtrl', 'framesDisp', v => v);
+  linkRange('delayCtrl', 'delayDisp', v => v + 'ms');
+  linkRange('blurCtrl', 'blurDisp', v => v + 'px');
+  linkRange('sizeCtrl', 'sizeDisp', v => v + 'px');
+  linkRange('fovRange', 'fovDisp', v => v + '°');
+
+  document.getElementById('invertCtrl').addEventListener('change', updateDepthPreview);
+
+  // ─── DROP ZONES ──────────────────────────────────────────────────────────────
+
+  function setupDrop(zoneId, inputId, handler) {
+    const zone = document.getElementById(zoneId);
+    zone.addEventListener('dragover', e => { e.preventDefault(); zone.classList.add('over'); });
+    zone.addEventListener('dragleave', () => zone.classList.remove('over'));
+    zone.addEventListener('drop', e => {
+      e.preventDefault();
+      zone.classList.remove('over');
+      const f = e.dataTransfer.files[0];
+      if (f && f.type.startsWith('image/')) handler(f);
+    });
+    document.getElementById(inputId).addEventListener('change', e => {
+      if (e.target.files[0]) handler(e.target.files[0]);
+    });
+  }
+
+  setupDrop('dropZone', 'fileInput', loadSourceImage);
+  setupDrop('depthDropZone', 'depthInput', loadCustomDepth);
+
+  // ─── IMAGE LOADING ────────────────────────────────────────────────────────────
+
+  function loadSourceImage(file) {
+    const img = new Image();
+    img.onload = () => {
+      const canvas = document.getElementById('srcCanvas');
+      canvas.width = img.width;
+      canvas.height = img.height;
+      const ctx = canvas.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      srcImageData = ctx.getImageData(0, 0, img.width, img.height);
+      customDepthData = null;
+      customDepthFilename = null;
+      updateDepthSourceLabel();
+
+      document.getElementById('previews').classList.add('visible');
+      document.getElementById('depthOverride').style.display = 'block';
+      document.getElementById('generateBtn').disabled = false;
+
+      updateDepthPreview();
+      setStatus('ready  ·  ' + img.width + '×' + img.height, '');
+    };
+    img.src = URL.createObjectURL(file);
+  }
+
+  function loadCustomDepth(file) {
+    if (!srcImageData) return;
+    const img = new Image();
+    img.onload = () => {
+      if (img.width !== srcImageData.width || img.height !== srcImageData.height) {
+        setStatus('depth map dimensions must match source (' + srcImageData.width + '×' + srcImageData.height + ')', 'error');
+        return;
+      }
+      const tmp = document.createElement('canvas');
+      tmp.width = img.width; tmp.height = img.height;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(img, 0, 0);
+      customDepthData = ctx.getImageData(0, 0, img.width, img.height);
+      customDepthFilename = file.name;
+      updateDepthSourceLabel();
+      updateDepthPreview();
+      setStatus('using supplied depth map', 'done');
+    };
+    img.src = URL.createObjectURL(file);
+  }
+
+  function clearCustomDepth(e) {
+    e.preventDefault();
+    customDepthData = null;
+    customDepthFilename = null;
+    document.getElementById('depthInput').value = '';
+    updateDepthSourceLabel();
+    updateDepthPreview();
+    setStatus('reverted to luminance depth', '');
+  }
+
+  function updateDepthSourceLabel() {
+    const label = document.getElementById('depthSourceLabel');
+    const clearLink = document.getElementById('clearDepth');
+    if (customDepthData && customDepthFilename) {
+      label.textContent = 'depth map (custom: ' + customDepthFilename + ')';
+      label.style.color = 'var(--green)';
+      clearLink.style.display = 'inline';
+    } else {
+      label.textContent = 'depth map (luminance proxy)';
+      label.style.color = '';
+      clearLink.style.display = 'none';
+    }
+  }
+
+  // ─── DEPTH COMPUTATION ───────────────────────────────────────────────────────
+
+  function computeLuminanceDepth(imageData, invert) {
+    const { data, width, height } = imageData;
+    const depth = new Float32Array(width * height);
+    for (let i = 0; i < width * height; i++) {
+      const r = data[i * 4], g = data[i * 4 + 1], b = data[i * 4 + 2];
+      depth[i] = (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+    }
+    if (invert) for (let i = 0; i < depth.length; i++) depth[i] = 1 - depth[i];
+    return depth;
+  }
+
+  function boxBlur(data, width, height, r) {
+    if (r <= 0) return data;
+    const temp = new Float32Array(data.length);
+    const out = new Float32Array(data.length);
+    const ri = Math.floor(r);
+
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let s = 0;
+        for (let dx = -ri; dx <= ri; dx++) {
+          s += data[y * width + Math.max(0, Math.min(width - 1, x + dx))];
+        }
+        temp[y * width + x] = s / (2 * ri + 1);
+      }
+    }
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let s = 0;
+        for (let dy = -ri; dy <= ri; dy++) {
+          s += temp[Math.max(0, Math.min(height - 1, y + dy)) * width + x];
+        }
+        out[y * width + x] = s / (2 * ri + 1);
+      }
+    }
+    return out;
+  }
+
+  function getDepthMap(imageData) {
+    const invert = document.getElementById('invertCtrl').checked;
+    const blurR = parseInt(document.getElementById('blurCtrl').value);
+    const src = customDepthData || imageData;
+    let d = computeLuminanceDepth(src, invert);
+    d = boxBlur(d, imageData.width, imageData.height, blurR);
+    d = boxBlur(d, imageData.width, imageData.height, blurR); // 2 passes ≈ gaussian
+    return d;
+  }
+
+  function updateDepthPreview() {
+    if (!srcImageData) return;
+    const depth = getDepthMap(srcImageData);
+    currentDepthMap = depth;
+
+    const canvas = document.getElementById('depthCanvas');
+    canvas.width = srcImageData.width;
+    canvas.height = srcImageData.height;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(srcImageData.width, srcImageData.height);
+    for (let i = 0; i < depth.length; i++) {
+      const v = Math.round(depth[i] * 255);
+      img.data[i * 4] = v;
+      img.data[i * 4 + 1] = v;
+      img.data[i * 4 + 2] = v;
+      img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // ─── MODE-AWARE SHIFT LABEL ──────────────────────────────────────────────────
+  let savedParallaxShift = 20;
+  document.querySelectorAll('input[name="mode"]').forEach(r => {
+    r.addEventListener('change', () => {
+      const mode = document.querySelector('input[name="mode"]:checked').value;
+      const label = document.getElementById('shiftLabel');
+      const ctrl = document.getElementById('shiftCtrl');
+      const fovEl = document.getElementById('fovCtrl');
+      if (mode === 'orbit') {
+        savedParallaxShift = parseFloat(ctrl.value);
+        label.textContent = 'baseline';
+        ctrl.min = 1; ctrl.max = 15; ctrl.step = 0.5; ctrl.value = 6.5;
+        document.getElementById('shiftDisp').textContent = '6.5cm';
+        fovEl.style.display = '';
+      } else {
+        label.textContent = 'parallax shift';
+        ctrl.min = 3; ctrl.max = 60; ctrl.step = 1;
+        ctrl.value = savedParallaxShift;
+        document.getElementById('shiftDisp').textContent = savedParallaxShift + 'px';
+        fovEl.style.display = 'none';
+      }
+    });
+  });
+
+  // update display format when slider moves
+  const origShiftFmt = v => {
+    const mode = document.querySelector('input[name="mode"]:checked').value;
+    return mode === 'orbit' ? v + 'cm' : v + 'px';
+  };
+  document.getElementById('shiftCtrl').addEventListener('input', function() {
+    document.getElementById('shiftDisp').textContent = origShiftFmt(this.value);
+  });
+
+  // ─── FRAME GENERATION ─────────────────────────────────────────────────────────
+
+  const NUM_DEPTH_PASSES = 32;
+
+  // PARALLAX: forward mapping, back-to-front
+  function generateFrameParallax(srcData, depth, xOffset, width, height) {
+    const out = new Uint8ClampedArray(srcData.buffer.slice(0, width * height * 4));
+    for (let pass = 0; pass < NUM_DEPTH_PASSES; pass++) {
+      const minD = pass / NUM_DEPTH_PASSES;
+      const maxD = (pass + 1) / NUM_DEPTH_PASSES;
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = y * width + x;
+          const d = depth[idx];
+          if (d < minD || d >= maxD) continue;
+          const dstX = Math.round(x + d * xOffset);
+          if (dstX < 0 || dstX >= width) continue;
+          const si = idx * 4;
+          const di = (y * width + dstX) * 4;
+          out[di]     = srcData[si];
+          out[di + 1] = srcData[si + 1];
+          out[di + 2] = srcData[si + 2];
+          out[di + 3] = 255;
+        }
+      }
+    }
+    return out;
+  }
+
+  // WARP: backward mapping
+  function generateFrameWarp(srcData, depth, xOffset, width, height) {
+    const out = new Uint8ClampedArray(width * height * 4);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const d = depth[y * width + x];
+        const srcX = Math.max(0, Math.min(width - 1, Math.round(x - d * xOffset)));
+        const si = (y * width + srcX) * 4;
+        const di = (y * width + x) * 4;
+        out[di]     = srcData[si];
+        out[di + 1] = srcData[si + 1];
+        out[di + 2] = srcData[si + 2];
+        out[di + 3] = 255;
+      }
+    }
+    return out;
+  }
+
+  // ORBIT: physical wigglegram emulation via lateral camera translation
+  // Real lenticular cameras have 2-4 lenses spaced centimeters apart, all
+  // aimed in the same direction (parallel optical axes, NOT toe-in rotation).
+  // Displacement = f_px * baseline * (1/Z_converge - 1/Z)  — inverse depth.
+  // Convergence plane stays still; near objects swing more, far objects less.
+  // Forward mapping (back-to-front) with 3-pass 4-neighbor dilation hole-fill.
+  function generateFrameOrbit(srcData, depth, baselineCm, width, height) {
+    const tx = baselineCm / 100; // cm → metres
+
+    // Pinhole intrinsics — FOV from slider
+    const fovDeg = parseInt(document.getElementById('fovRange').value);
+    const fx = width / (2 * Math.tan((fovDeg / 2) * Math.PI / 180));
+
+    // Depth range in synthetic metres
+    // bright (dn=1) = near = small Z, dark (dn=0) = far = large Z
+    const zNear = 1.0, zFar = 10.0;
+    const Zf = (zNear + zFar) / 2; // convergence plane — stays still
+
+    // Output: start with source as gap fill, track which pixels got written
+    const out = new Uint8ClampedArray(srcData.buffer.slice(0, width * height * 4));
+    const written = new Uint8Array(width * height);
+
+    // Process back-to-front so near pixels overwrite far
+    for (let pass = NUM_DEPTH_PASSES - 1; pass >= 0; pass--) {
+      const minD = pass / NUM_DEPTH_PASSES;
+      const maxD = (pass + 1) / NUM_DEPTH_PASSES;
+
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const idx = y * width + x;
+          const dn = depth[idx];
+          if (dn < minD || dn >= maxD) continue;
+
+          // Map depth: bright (dn=1) = near = small Z
+          const Z = zFar - dn * (zFar - zNear);
+
+          // Stereo disparity: pixels at Zf stay put, everything else shifts
+          const shift = tx * fx * (1 / Zf - 1 / Z);
+          const dstX = Math.round(x + shift);
+
+          if (dstX < 0 || dstX >= width) continue;
+
+          const si = idx * 4;
+          const di = (y * width + dstX) * 4;
+          out[di]     = srcData[si];
+          out[di + 1] = srcData[si + 1];
+          out[di + 2] = srcData[si + 2];
+          out[di + 3] = 255;
+          written[y * width + dstX] = 1;
+        }
+      }
+    }
+
+    // Hole fill: 3-pass 4-neighbor dilation
+    for (let p = 0; p < 3; p++) {
+      const snap = new Uint8Array(written);
+      for (let y = 0; y < height; y++) {
+        for (let x = 0; x < width; x++) {
+          const i = y * width + x;
+          if (snap[i]) continue;
+          let src = -1;
+          if (x > 0              && snap[i - 1])     src = i - 1;
+          else if (x < width - 1  && snap[i + 1])     src = i + 1;
+          else if (y > 0          && snap[i - width])  src = i - width;
+          else if (y < height - 1 && snap[i + width])  src = i + width;
+          if (src < 0) continue;
+          out[i * 4]     = out[src * 4];
+          out[i * 4 + 1] = out[src * 4 + 1];
+          out[i * 4 + 2] = out[src * 4 + 2];
+          out[i * 4 + 3] = 255;
+          written[i] = 1;
+        }
+      }
+    }
+
+    return out;
+  }
+
+  function generateFrame(srcData, depth, offset, width, height) {
+    const mode = document.querySelector('input[name="mode"]:checked').value;
+    if (mode === 'orbit')    return generateFrameOrbit(srcData, depth, offset, width, height);
+    if (mode === 'warp')     return generateFrameWarp(srcData, depth, offset, width, height);
+    return generateFrameParallax(srcData, depth, offset, width, height);
+  }
+
+  // ─── STATUS ────────────────────────────────────────────────────────────────────
+
+  function setStatus(msg, type) {
+    const el = document.getElementById('status');
+    el.textContent = msg;
+    el.className = 'status ' + (type || '');
+  }
+
+  function setProgress(pct) {
+    const track = document.getElementById('progressTrack');
+    const fill = document.getElementById('progressFill');
+    if (pct >= 0) {
+      track.classList.add('visible');
+      fill.style.width = pct + '%';
+    } else {
+      track.classList.remove('visible');
+      fill.style.width = '0%';
+    }
+  }
+
+  // ─── GENERATE ──────────────────────────────────────────────────────────────────
+
+  async function generate() {
+    const btn = document.getElementById('generateBtn');
+    btn.disabled = true;
+
+    const maxShift = parseFloat(document.getElementById('shiftCtrl').value);
+    const numFrames = parseInt(document.getElementById('framesCtrl').value);
+    const frameDelay = parseInt(document.getElementById('delayCtrl').value);
+    const maxWidth = parseInt(document.getElementById('sizeCtrl').value);
+
+    setStatus('scaling image...', 'working');
+    setProgress(0);
+
+    // Scale source image
+    let width = srcImageData.width;
+    let height = srcImageData.height;
+    let scaledSrc = srcImageData;
+
+    if (width > maxWidth) {
+      const scale = maxWidth / width;
+      width = Math.round(srcImageData.width * scale);
+      height = Math.round(srcImageData.height * scale);
+
+      const tmp = document.createElement('canvas');
+      tmp.width = width; tmp.height = height;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(document.getElementById('srcCanvas'), 0, 0, width, height);
+      scaledSrc = ctx.getImageData(0, 0, width, height);
+    }
+
+    // Recompute depth at scaled resolution
+    const invert = document.getElementById('invertCtrl').checked;
+    const blurR = parseInt(document.getElementById('blurCtrl').value);
+    let depth;
+
+    if (customDepthData) {
+      // Scale from raw custom depth data (not depthCanvas which has blur baked in)
+      const rawCanvas = document.createElement('canvas');
+      rawCanvas.width = customDepthData.width; rawCanvas.height = customDepthData.height;
+      rawCanvas.getContext('2d').putImageData(customDepthData, 0, 0);
+      const tmp = document.createElement('canvas');
+      tmp.width = width; tmp.height = height;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(rawCanvas, 0, 0, width, height);
+      const scaledDepthData = ctx.getImageData(0, 0, width, height);
+      depth = computeLuminanceDepth(scaledDepthData, invert);
+    } else {
+      depth = computeLuminanceDepth(scaledSrc, invert);
+    }
+    depth = boxBlur(depth, width, height, blurR);
+    depth = boxBlur(depth, width, height, blurR);
+
+    setStatus('loading gif encoder...', 'working');
+
+    // Fetch gif.js worker as blob (avoids CORS worker issues)
+    let workerUrl;
+    try {
+      const resp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js');
+      const code = await resp.text();
+      workerUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+    } catch(e) {
+      setStatus('could not load gif encoder: ' + e.message, 'error');
+      btn.disabled = false;
+      return;
+    }
+
+    const gif = new GIF({
+      workers: 2,
+      quality: 8,
+      workerScript: workerUrl,
+      width: width,
+      height: height,
+      repeat: 0
+    });
+
+    // Build frame canvas
+    const frameCanvas = document.createElement('canvas');
+    frameCanvas.width = width;
+    frameCanvas.height = height;
+    const fCtx = frameCanvas.getContext('2d');
+
+    // Generate oscillating frames: 0 → peak → 0 → trough → 0
+    for (let i = 0; i < numFrames; i++) {
+      const angle = (i / numFrames) * 2 * Math.PI;
+      const xOffset = maxShift * Math.sin(angle);
+
+      const framePixels = generateFrame(scaledSrc.data, depth, xOffset, width, height);
+      const imgData = fCtx.createImageData(width, height);
+      imgData.data.set(framePixels);
+      fCtx.putImageData(imgData, 0, 0);
+
+      gif.addFrame(frameCanvas, { delay: frameDelay, copy: true });
+
+      const pct = Math.round(((i + 1) / numFrames) * 50);
+      setStatus(`building frames  ${i + 1}/${numFrames}`, 'working');
+      setProgress(pct);
+
+      await new Promise(r => setTimeout(r, 0));
+    }
+
+    gif.on('progress', p => {
+      setProgress(50 + Math.round(p * 50));
+      setStatus(`encoding  ${Math.round(p * 100)}%`, 'working');
+    });
+
+    gif.on('finished', blob => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = 'wigglegram.gif';
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+      URL.revokeObjectURL(workerUrl);
+
+      const kb = Math.round(blob.size / 1024);
+      setStatus(`done  ·  ${width}×${height}  ·  ${numFrames}f  ·  ${kb}kb`, 'done');
+      setProgress(-1);
+      btn.disabled = false;
+    });
+
+    gif.render();
+  }
+</script>
+</body>
+</html>
