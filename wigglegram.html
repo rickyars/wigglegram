@@ -255,6 +255,31 @@
   .note a { color: var(--green-dim); text-decoration: none; }
   .note a:hover { color: var(--green); }
 
+  /* tooltips */
+  .ctrl { position: relative; }
+  .ctrl[data-tip]:hover::after {
+    content: attr(data-tip);
+    position: absolute;
+    bottom: calc(100% + 6px);
+    left: 0;
+    width: 220px;
+    background: #1a1a1a;
+    border: 1px solid var(--border-active);
+    color: var(--text);
+    font-size: 0.68rem;
+    line-height: 1.5;
+    padding: 0.5rem 0.65rem;
+    pointer-events: none;
+    z-index: 100;
+    white-space: normal;
+    letter-spacing: 0.02em;
+  }
+  /* keep tooltip on-screen for right-column cells */
+  .ctrl:nth-child(3n)[data-tip]:hover::after {
+    left: auto;
+    right: 0;
+  }
+
   @media (max-width: 600px) {
     .controls-grid { grid-template-columns: 1fr 1fr; }
     .ctrl:nth-child(3n) { border-right: 1px solid var(--border); }
@@ -302,34 +327,34 @@
 <div class="controls">
   <div class="controls-header">parameters</div>
   <div class="controls-grid">
-    <div class="ctrl">
-      <div class="ctrl-label"><span id="shiftLabel">parallax shift</span> <span id="shiftDisp">20px</span></div>
-      <input type="range" id="shiftCtrl" min="3" max="60" value="20">
+    <div class="ctrl" id="shiftCtrl_wrap" data-tip="How far apart the simulated camera positions are, in cm. Larger = more 3D depth but also more edge tearing where background is revealed. 5–8cm mimics real lenticular camera spacing.">
+      <div class="ctrl-label"><span id="shiftLabel">baseline</span> <span id="shiftDisp">6.5cm</span></div>
+      <input type="range" id="shiftCtrl" min="1" max="15" step="0.5" value="6.5">
     </div>
-    <div class="ctrl">
+    <div class="ctrl" data-tip="Number of synthetic camera positions to generate. Real wigglegrams use 2–4 physical photos; this tool synthesizes all positions from one image using the depth map. More frames = smoother loop, bigger file.">
       <div class="ctrl-label">frames <span id="framesDisp">8</span></div>
       <input type="range" id="framesCtrl" min="4" max="20" step="2" value="8">
     </div>
-    <div class="ctrl">
+    <div class="ctrl" data-tip="Delay between frames in milliseconds. Lower = faster wiggle. 60–100ms is a natural wiggle speed; below 40ms looks jittery.">
       <div class="ctrl-label">frame delay <span id="delayDisp">80ms</span></div>
       <input type="range" id="delayCtrl" min="30" max="200" step="10" value="80">
     </div>
-    <div class="ctrl">
+    <div class="ctrl" data-tip="Blur radius applied to the depth map before rendering. Smooths hard depth edges to reduce pixel-jumping artifacts between layers. Two passes approximate a gaussian blur.">
       <div class="ctrl-label">depth blur <span id="blurDisp">8px</span></div>
       <input type="range" id="blurCtrl" min="0" max="40" value="8">
     </div>
-    <div class="ctrl">
+    <div class="ctrl" data-tip="GIF output width in pixels. Image is scaled down to this before encoding. Lower = smaller file and faster encode. Height scales proportionally.">
       <div class="ctrl-label">output width <span id="sizeDisp">800px</span></div>
       <input type="range" id="sizeCtrl" min="200" max="3000" step="100" value="800">
     </div>
-    <div class="ctrl">
+    <div class="ctrl" data-tip="Flip the depth map polarity. By default bright = near, dark = far. Check this if your depth map uses the opposite convention (e.g. raw ARAG output may vary).">
       <div class="ctrl-label">depth</div>
       <div class="ctrl-checkbox">
         <input type="checkbox" id="invertCtrl">
         <span>invert (dark = near)</span>
       </div>
     </div>
-    <div class="ctrl" id="fovCtrl" style="display:none;">
+    <div class="ctrl" id="fovCtrl" data-tip="Simulated camera field of view for orbit mode. Affects how focal length is calculated from the baseline. Wider FOV = shorter focal length = less disparity at the same baseline.">
       <div class="ctrl-label">fov <span id="fovDisp">45°</span></div>
       <input type="range" id="fovRange" min="20" max="80" value="45">
     </div>
@@ -337,16 +362,16 @@
       <div class="ctrl-label" style="margin-bottom:0.6rem;">effect mode</div>
       <div style="display:flex; gap: 2rem; flex-wrap:wrap;">
         <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
-          <input type="radio" name="mode" value="parallax" id="modeParallax" checked style="accent-color:var(--green);">
+          <input type="radio" name="mode" value="orbit" id="modeOrbit" checked style="accent-color:#7eb8ff;">
+          <span style="color:#7eb8ff;">orbit <span style="color:var(--text-dim); font-size:0.7em;">— lenticular camera sim, lateral stereo shift (best with depth map)</span></span>
+        </label>
+        <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
+          <input type="radio" name="mode" value="parallax" id="modeParallax" style="accent-color:var(--green);">
           <span>parallax <span style="color:var(--text-dim); font-size:0.7em;">— forward mapped, near objects occlude far</span></span>
         </label>
         <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
           <input type="radio" name="mode" value="warp" id="modeWarp" style="accent-color:var(--amber);">
           <span style="color:var(--amber);">warp <span style="color:var(--text-dim); font-size:0.7em;">— backward mapped, liquid stretch</span></span>
-        </label>
-        <label style="display:flex; align-items:center; gap:0.5rem; cursor:pointer;">
-          <input type="radio" name="mode" value="orbit" id="modeOrbit" style="accent-color:#7eb8ff;">
-          <span style="color:#7eb8ff;">orbit <span style="color:var(--text-dim); font-size:0.7em;">— lenticular camera sim, lateral stereo shift (best with depth map)</span></span>
         </label>
       </div>
     </div>
@@ -555,12 +580,19 @@
   }
 
   // ─── MODE-AWARE SHIFT LABEL ──────────────────────────────────────────────────
+  const TIPS = {
+    orbit:    'How far apart the simulated camera positions are, in cm. Larger = more 3D depth but also more edge tearing where background is revealed. 5–8cm mimics real lenticular camera spacing.',
+    parallax: 'Max pixel displacement per frame. Higher = more dramatic 3D pop, but increases edge tearing and disocclusion holes.',
+    warp:     'Max pixel displacement per frame. Higher = more dramatic stretch effect.',
+  };
+
   let savedParallaxShift = 20;
   document.querySelectorAll('input[name="mode"]').forEach(r => {
     r.addEventListener('change', () => {
       const mode = document.querySelector('input[name="mode"]:checked').value;
       const label = document.getElementById('shiftLabel');
       const ctrl = document.getElementById('shiftCtrl');
+      const wrap = document.getElementById('shiftCtrl_wrap');
       const fovEl = document.getElementById('fovCtrl');
       if (mode === 'orbit') {
         savedParallaxShift = parseFloat(ctrl.value);
@@ -575,6 +607,7 @@
         document.getElementById('shiftDisp').textContent = savedParallaxShift + 'px';
         fovEl.style.display = 'none';
       }
+      wrap.dataset.tip = TIPS[mode];
     });
   });
 

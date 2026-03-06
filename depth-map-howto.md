@@ -12,9 +12,7 @@ cd Any-Resolution-Any-Geometry
 pip install -r requirements.txt
 
 mkdir -p work_dir/ckpts
-huggingface-cli download Kingslanding/Any-Resolution-Any-Geometry \
-    ckpt_best.pth ckpt_promask_best.pth \
-    --local-dir work_dir/ckpts
+huggingface-cli download Kingslanding/Any-Resolution-Any-Geometry ckpt_best.pth ckpt_promask_best.pth --local-dir work_dir/ckpts
 ```
 
 ### Run
