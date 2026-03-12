@@ -571,15 +571,17 @@
     if (!srcImageData) return;
     const img = new Image();
     img.onload = () => {
-      if (img.width !== srcImageData.width || img.height !== srcImageData.height) {
-        setStatus('depth map dimensions must match source (' + srcImageData.width + '\u00d7' + srcImageData.height + ')', 'error');
+      const sw = srcImageData.width, sh = srcImageData.height;
+      const tooFar = Math.abs(img.width - sw) > 4 || Math.abs(img.height - sh) > 4;
+      if (tooFar) {
+        setStatus('depth map dimensions too different from source (' + sw + '\u00d7' + sh + ')', 'error');
         return;
       }
       const tmp = document.createElement('canvas');
-      tmp.width = img.width; tmp.height = img.height;
+      tmp.width = sw; tmp.height = sh;
       const ctx = tmp.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      customDepthData = ctx.getImageData(0, 0, img.width, img.height);
+      ctx.drawImage(img, 0, 0, sw, sh);
+      customDepthData = ctx.getImageData(0, 0, sw, sh);
       customDepthFilename = file.name;
       updateDepthSourceLabel();
 
