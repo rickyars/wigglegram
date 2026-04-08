@@ -743,7 +743,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       updateDepthPaneLabel('depth (luminance)');
 
       document.getElementById('previews').classList.add('visible');
-      document.getElementById('generateBtn').disabled = false;
+      document.getElementById('generateBtn').disabled = true;
       document.getElementById('previewBtn').disabled = false;
 
       // Update source upload button
@@ -1311,6 +1311,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     const img = document.getElementById('gifPreview');
     img.src = gifBlobUrl;
     panel.classList.add('visible');
+    document.getElementById('generateBtn').disabled = false;
   }
 
   // Clean up on page unload
@@ -1318,15 +1319,17 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (gifBlobUrl) URL.revokeObjectURL(gifBlobUrl);
   });
 
-  // ─── GENERATE ──────────────────────────────────────────────────────────────
-  window.generate = async function() {
-    const btn = document.getElementById('generateBtn');
-    btn.disabled = true;
+  // ─── PIPELINE ──────────────────────────────────────────────────────────────
+  async function runPipeline(targetWidth) {
+    if (!srcImageData) return;
 
-    const maxShift = PARAMS.baseline;
+    const previewBtn = document.getElementById('previewBtn');
+    const generateBtn = document.getElementById('generateBtn');
+    previewBtn.disabled = true;
+    generateBtn.disabled = true;
+
     const numFrames = PARAMS.frames;
     const frameDelay = PARAMS.frameDelay;
-    const maxWidth = PARAMS.outputWidth;
     const cocScale = PARAMS.bokehCoc;
     const focusDist = PARAMS.focusDist;
     const wrapRadius = PARAMS.lightWrap;
@@ -1340,8 +1343,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     let height = srcImageData.height;
     let scaledSrc = srcImageData;
 
-    if (width > maxWidth) {
-      const scale = maxWidth / width;
+    if (width > targetWidth) {
+      const scale = targetWidth / width;
       width = Math.round(srcImageData.width * scale);
       height = Math.round(srcImageData.height * scale);
 
@@ -1352,14 +1355,15 @@ sharp predict -i your_image.jpg -o output/</pre>
       scaledSrc = ctx.getImageData(0, 0, width, height);
     }
 
-    // Recompute depth at scaled resolution
+    // Compute depth at scaled resolution from activeDepthSource
     const invert = PARAMS.invertDepth;
     let depth;
 
-    if (customDepthData) {
+    if (activeDepthSource instanceof ImageDepthSource) {
       const rawCanvas = document.createElement('canvas');
-      rawCanvas.width = customDepthData.width; rawCanvas.height = customDepthData.height;
-      rawCanvas.getContext('2d').putImageData(customDepthData, 0, 0);
+      rawCanvas.width = activeDepthSource.depthImageData.width;
+      rawCanvas.height = activeDepthSource.depthImageData.height;
+      rawCanvas.getContext('2d').putImageData(activeDepthSource.depthImageData, 0, 0);
       const tmp = document.createElement('canvas');
       tmp.width = width; tmp.height = height;
       const ctx = tmp.getContext('2d');
@@ -1367,6 +1371,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const scaledDepthData = ctx.getImageData(0, 0, width, height);
       depth = computeLuminanceDepth(scaledDepthData, invert);
     } else {
+      // LuminanceDepthSource: compute from scaled source
       depth = computeLuminanceDepth(scaledSrc, invert);
     }
     const depthSmoothR = Math.min(cocScale, 4);
@@ -1375,6 +1380,7 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     // Pre-blur source proportional to depth (background blurs, foreground stays sharp)
     const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
+    const blurredSrc = { data: blurredSrcData, width, height };
 
     setStatus('loading gif encoder...', 'working');
 
@@ -1386,7 +1392,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       workerUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
     } catch(e) {
       setStatus('could not load gif encoder: ' + e.message, 'error');
-      btn.disabled = false;
+      previewBtn.disabled = false;
       return;
     }
 
@@ -1406,14 +1412,15 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     for (let i = 0; i < numFrames; i++) {
       const angle = (i / numFrames) * 2 * Math.PI;
-      const xOffset = maxShift * Math.sin(angle);
 
-      let framePixels = generateFrame(blurredSrcData, depth, xOffset, width, height);
-      framePixels = applyLightWrap(framePixels, depth, wrapRadius, width, height);
-      framePixels = circularDiscBokeh(framePixels, depth, focusDist, cocScale, width, height);
-      framePixels = applyChromaticAberration(framePixels, caStrength, angle, width, height);
+      const { colorData, depthArray, width: fw, height: fh } =
+        await activeDepthSource.captureFrame(i, numFrames, PARAMS.mode, PARAMS, blurredSrc, depth);
 
-      const imgData = fCtx.createImageData(width, height);
+      let framePixels = applyLightWrap(colorData, depthArray, wrapRadius, fw, fh);
+      framePixels = circularDiscBokeh(framePixels, depthArray, focusDist, cocScale, fw, fh);
+      framePixels = applyChromaticAberration(framePixels, caStrength, angle, fw, fh);
+
+      const imgData = fCtx.createImageData(fw, fh);
       imgData.data.set(framePixels);
       fCtx.putImageData(imgData, 0, 0);
 
@@ -1438,10 +1445,19 @@ sharp predict -i your_image.jpg -o output/</pre>
       const kb = Math.round(blob.size / 1024);
       setStatus(`done  \u00b7  ${width}\u00d7${height}  \u00b7  ${numFrames}f  \u00b7  ${kb}kb`, 'done');
       setProgress(-1);
-      btn.disabled = false;
+      previewBtn.disabled = false;
+      // generateBtn is enabled by showGifPreview()
     });
 
     gif.render();
+  }
+
+  window.generate = async function() {
+    await runPipeline(PARAMS.outputWidth);
+  };
+
+  window.generatePreview = async function() {
+    await runPipeline(400);
   };
 
   // ─── SPLAT MODE ────────────────────────────────────────────────────────────
