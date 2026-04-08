@@ -453,10 +453,13 @@ sharp predict -i your_image.jpg -o output/</pre>
         'orbit': 'orbit',
         'parallax': 'parallax',
         'warp': 'warp',
-        'splat': 'splat wiggle',
       },
     }).on('change', (ev) => {
       updateModeUI(ev.value);
+      if (activeDepthSource instanceof SplatDepthSource) {
+        activeDepthSource.stopOscillation();
+        activeDepthSource.startOscillation(ev.value, PARAMS);
+      }
     });
 
     baselineBinding = motion.addBinding(PARAMS, 'baseline', {
@@ -528,7 +531,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         label: 'baseline',
         min: 1, max: 15, step: 0.5,
       });
-    } else if (mode === 'splat') {
+    } else if (mode === 'warp') {
       PARAMS.baseline = 3;
       fovBinding.hidden = true;
       baselineBinding.dispose();
@@ -546,17 +549,6 @@ sharp predict -i your_image.jpg -o output/</pre>
         label: 'parallax shift',
         min: 3, max: 60, step: 1,
       });
-    }
-    if (mode === 'splat') {
-      // Entering splat mode: show container if a splat is already loaded
-      if (splatViewer) {
-        document.getElementById('splatContainer').style.display = 'block';
-        startSplatOscillation();
-      }
-    } else {
-      // Leaving splat mode: stop loop and hide container
-      if (splatOscId) { cancelAnimationFrame(splatOscId); splatOscId = null; }
-      document.getElementById('splatContainer').style.display = 'none';
     }
   }
 
