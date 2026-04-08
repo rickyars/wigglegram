@@ -206,9 +206,7 @@
   }
   .upload-btn input { display: none; }
 
-  #depthUploadBtn { display: none; }
-  #depthUploadBtn.visible { display: flex; }
-
+  #depthUploadBtn { display: flex; }
   /* ─── TWEAKPANE CONTAINER ─────────────────────────────────── */
   #tweakpane-container {
     width: 100%;
@@ -328,6 +326,14 @@
       <img id="gifPreview" alt="generated wigglegram">
     </div>
 
+    <div id="splatContainer" style="display:none; border: 1px solid var(--border); overflow:hidden;">
+      <div class="preview-label">
+        <span>splat viewer</span>
+        <button class="download-btn" id="recordSplatBtn" onclick="recordSplatGif()">record gif</button>
+      </div>
+      <canvas id="splatCanvas" style="display:block; width:100%; background:#000;"></canvas>
+    </div>
+
     <div class="status" id="status">load an image to begin</div>
     <div class="progress-track" id="progressTrack">
       <div class="progress-fill" id="progressFill" style="width:0%"></div>
@@ -338,6 +344,15 @@
       <a href="https://github.com/Dreamaker-MrC/Any-Resolution-Any-Geometry" target="_blank">ARAG</a>
       locally and supply the output via the depth map upload button.
     </div>
+
+    <details id="mlsharpHelp" style="display:none; margin-top:0.5rem; border-left: 2px solid var(--border-active); padding: 0.75rem 1rem; color: var(--text-dim); font-size: 0.72rem; line-height: 1.7;">
+      <summary style="cursor:pointer; color: var(--text); letter-spacing:0.06em;">ml-sharp: how to produce a splat</summary>
+      <pre style="margin-top:0.5rem; font-size:0.68rem; line-height:1.8; white-space:pre-wrap; color: var(--text-dim);">git clone https://github.com/apple/ml-sharp
+cd ml-sharp
+pip install -e .
+sharp predict -i your_image.jpg -o output/</pre>
+      <div style="margin-top:0.4rem;">produces <code>output/your_image.ply</code>. use <b>splat wiggle</b> mode to load it.</div>
+    </details>
   </div>
 
   <!-- RIGHT PANEL: uploads, tweakpane, generate -->
@@ -351,6 +366,12 @@
         <span class="label-text">Upload Depth Map (optional)</span>
         <input type="file" id="depthInput" accept="image/*">
       </label>
+      <div id="splatUploadRow">
+        <label class="upload-btn" id="splatUploadBtn">
+          <span class="label-text">Upload Splat (.ply)</span>
+          <input type="file" id="splatInput">
+        </label>
+      </div>
     </div>
 
     <div id="tweakpane-container"></div>
@@ -359,6 +380,14 @@
   </div>
 </div>
 
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+    "@mkkellogg/gaussian-splats-3d": "https://cdn.jsdelivr.net/npm/@mkkellogg/gaussian-splats-3d/build/gaussian-splats-3d.module.js"
+  }
+}
+</script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.js"></script>
 <script type="module">
   // ─── TWEAKPANE IMPORT ───────────────────────────────────────────────────────
@@ -411,6 +440,7 @@
   // ─── TWEAKPANE SETUP ───────────────────────────────────────────────────────
   let fovBinding = null;
   let baselineBinding = null;
+  let motionFolder = null;
 
   function setupTweakpane() {
     const pane = new Tweakpane.Pane({
@@ -420,6 +450,7 @@
 
     // ── Motion folder ──
     const motion = pane.addFolder({ title: 'Motion' });
+    motionFolder = motion;
 
     motion.addBinding(PARAMS, 'mode', {
       label: 'effect mode',
@@ -427,6 +458,7 @@
         'orbit': 'orbit',
         'parallax': 'parallax',
         'warp': 'warp',
+        'splat': 'splat wiggle',
       },
     }).on('change', (ev) => {
       updateModeUI(ev.value);
@@ -496,29 +528,40 @@
       PARAMS.baseline = 6.5;
       fovBinding.hidden = false;
       baselineBinding.dispose();
-      // Recreate with orbit range
-      const motionFolder = fovBinding.parent;
-      baselineBinding = motionFolder.addBinding(PARAMS, 'baseline', {
+      const folder = motionFolder;
+      baselineBinding = folder.addBinding(PARAMS, 'baseline', {
         label: 'baseline',
         min: 1, max: 15, step: 0.5,
       });
-      // Move it to index 1 (after mode)
-      motionFolder.remove(baselineBinding);
-      motionFolder.add(baselineBinding, 1);
+    } else if (mode === 'splat') {
+      PARAMS.baseline = 3;
+      fovBinding.hidden = true;
+      baselineBinding.dispose();
+      const folder = motionFolder;
+      baselineBinding = folder.addBinding(PARAMS, 'baseline', {
+        label: 'amplitude (°)',
+        min: 1, max: 15, step: 0.5,
+      });
     } else {
-      if (PARAMS.mode !== mode) {
-        // switching away from orbit or between parallax/warp
-      }
       PARAMS.baseline = savedParallaxShift;
       fovBinding.hidden = true;
       baselineBinding.dispose();
-      const motionFolder = fovBinding.parent;
-      baselineBinding = motionFolder.addBinding(PARAMS, 'baseline', {
+      const folder = motionFolder;
+      baselineBinding = folder.addBinding(PARAMS, 'baseline', {
         label: 'parallax shift',
         min: 3, max: 60, step: 1,
       });
-      motionFolder.remove(baselineBinding);
-      motionFolder.add(baselineBinding, 1);
+    }
+    if (mode === 'splat') {
+      // Entering splat mode: show container if a splat is already loaded
+      if (splatViewer) {
+        document.getElementById('splatContainer').style.display = 'block';
+        startSplatOscillation();
+      }
+    } else {
+      // Leaving splat mode: stop loop and hide container
+      if (splatOscId) { cancelAnimationFrame(splatOscId); splatOscId = null; }
+      document.getElementById('splatContainer').style.display = 'none';
     }
   }
 
@@ -821,6 +864,63 @@
     return out;
   }
 
+  // ─── DEPTH BLUR STACK ──────────────────────────────────────────────────────
+  function gaussianBlurRGBA(srcData, width, height, radius) {
+    if (radius < 0.5) return new Uint8ClampedArray(srcData);
+    const ri = Math.round(radius);
+    const temp = new Uint8ClampedArray(srcData.length);
+    const out = new Uint8ClampedArray(srcData.length);
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let r = 0, g = 0, b = 0, count = 0;
+        for (let dx = -ri; dx <= ri; dx++) {
+          const sx = Math.max(0, Math.min(width - 1, x + dx));
+          const si = (y * width + sx) * 4;
+          r += srcData[si]; g += srcData[si + 1]; b += srcData[si + 2]; count++;
+        }
+        const di = (y * width + x) * 4;
+        temp[di] = r / count; temp[di + 1] = g / count; temp[di + 2] = b / count; temp[di + 3] = srcData[di + 3];
+      }
+    }
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        let r = 0, g = 0, b = 0, count = 0;
+        for (let dy = -ri; dy <= ri; dy++) {
+          const sy = Math.max(0, Math.min(height - 1, y + dy));
+          const si = (sy * width + x) * 4;
+          r += temp[si]; g += temp[si + 1]; b += temp[si + 2]; count++;
+        }
+        const di = (y * width + x) * 4;
+        out[di] = r / count; out[di + 1] = g / count; out[di + 2] = b / count; out[di + 3] = srcData[di + 3];
+      }
+    }
+    return out;
+  }
+
+  function buildDepthBlurredSrc(srcData, depth, width, height, maxRadius) {
+    if (maxRadius < 1) return srcData;
+    const NUM_LEVELS = 5;
+    const stack = [];
+    for (let level = 0; level < NUM_LEVELS; level++) {
+      const r = (level / (NUM_LEVELS - 1)) * maxRadius;
+      stack.push(gaussianBlurRGBA(srcData, width, height, r));
+    }
+    const out = new Uint8ClampedArray(srcData.length);
+    for (let i = 0; i < width * height; i++) {
+      const d = depth[i];
+      const fLevel = d * (NUM_LEVELS - 1);
+      const lo = Math.floor(fLevel);
+      const hi = Math.min(NUM_LEVELS - 1, lo + 1);
+      const t = fLevel - lo;
+      const si = i * 4;
+      out[si]     = stack[lo][si]     * (1 - t) + stack[hi][si]     * t;
+      out[si + 1] = stack[lo][si + 1] * (1 - t) + stack[hi][si + 1] * t;
+      out[si + 2] = stack[lo][si + 2] * (1 - t) + stack[hi][si + 2] * t;
+      out[si + 3] = 255;
+    }
+    return out;
+  }
+
   function getDepthMap(imageData) {
     const invert = PARAMS.invertDepth;
     const smoothR = Math.min(PARAMS.bokehCoc, 4);
@@ -856,6 +956,8 @@
 
   function generateFrameParallax(srcData, depth, xOffset, width, height) {
     const out = new Uint8ClampedArray(srcData.buffer.slice(0, width * height * 4));
+    const written = new Uint8Array(width * height);
+
     for (let pass = 0; pass < NUM_DEPTH_PASSES; pass++) {
       const minD = pass / NUM_DEPTH_PASSES;
       const maxD = (pass + 1) / NUM_DEPTH_PASSES;
@@ -872,9 +974,40 @@
           out[di + 1] = srcData[si + 1];
           out[di + 2] = srcData[si + 2];
           out[di + 3] = 255;
+          written[y * width + dstX] = 1;
         }
       }
     }
+
+    // Edge-aware occlusion fill
+    for (let y = 0; y < height; y++) {
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        if (written[i]) continue;
+        const expectedDepth = depth[i];
+        let leftSrc = -1, rightSrc = -1;
+        for (let dx = 1; dx <= 8 && leftSrc < 0; dx++) {
+          if (x - dx >= 0 && written[i - dx]) leftSrc = i - dx;
+        }
+        for (let dx = 1; dx <= 8 && rightSrc < 0; dx++) {
+          if (x + dx < width && written[i + dx]) rightSrc = i + dx;
+        }
+        if (leftSrc < 0 && rightSrc < 0) continue;
+        let src;
+        if (leftSrc < 0) src = rightSrc;
+        else if (rightSrc < 0) src = leftSrc;
+        else {
+          const ld = Math.abs(depth[leftSrc] - expectedDepth);
+          const rd = Math.abs(depth[rightSrc] - expectedDepth);
+          src = ld <= rd ? leftSrc : rightSrc;
+        }
+        out[i * 4]     = out[src * 4];
+        out[i * 4 + 1] = out[src * 4 + 1];
+        out[i * 4 + 2] = out[src * 4 + 2];
+        out[i * 4 + 3] = 255;
+      }
+    }
+
     return out;
   }
 
@@ -960,7 +1093,7 @@
 
   function generateFrame(srcData, depth, offset, width, height) {
     const mode = PARAMS.mode;
-    if (mode === 'orbit')    return generateFrameOrbit(srcData, depth, offset, width, height);
+    if (mode === 'orbit') return generateFrameOrbit(srcData, depth, offset, width, height);
     if (mode === 'warp')     return generateFrameWarp(srcData, depth, offset, width, height);
     return generateFrameParallax(srcData, depth, offset, width, height);
   }
@@ -1066,6 +1199,9 @@
     depth = boxBlur(depth, width, height, depthSmoothR);
     depth = boxBlur(depth, width, height, depthSmoothR);
 
+    // Pre-blur source proportional to depth (background blurs, foreground stays sharp)
+    const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
+
     setStatus('loading gif encoder...', 'working');
 
     // Fetch gif.js worker as blob
@@ -1098,7 +1234,7 @@
       const angle = (i / numFrames) * 2 * Math.PI;
       const xOffset = maxShift * Math.sin(angle);
 
-      let framePixels = generateFrame(scaledSrc.data, depth, xOffset, width, height);
+      let framePixels = generateFrame(blurredSrcData, depth, xOffset, width, height);
       framePixels = applyLightWrap(framePixels, depth, wrapRadius, width, height);
       framePixels = circularDiscBokeh(framePixels, depth, focusDist, cocScale, width, height);
       framePixels = applyChromaticAberration(framePixels, caStrength, angle, width, height);
@@ -1131,6 +1267,166 @@
       btn.disabled = false;
     });
 
+    gif.render();
+  };
+
+  // ─── SPLAT MODE ────────────────────────────────────────────────────────────
+  let splatViewer = null;
+  let splatOscId = null;
+  let splatScene = null;
+  let splatCamera = null;
+  let splatRenderer = null;
+  let splatBasePos = null;
+
+  document.getElementById('splatInput').addEventListener('change', (e) => {
+    if (e.target.files[0]) loadSplatFile(e.target.files[0]).catch(err => {
+      console.error('splat load error:', err);
+      setStatus('splat load failed — check console', 'error');
+    });
+  });
+
+  async function loadSplatFile(file) {
+    setStatus('loading splat libraries...', 'working');
+    let THREE, GS3D;
+    try {
+      THREE = await import('three');
+      GS3D = await import('@mkkellogg/gaussian-splats-3d');
+    } catch (err) {
+      console.error('splat library load failed:', err);
+      setStatus('failed to load splat libraries — check console', 'error');
+      return;
+    }
+
+    if (splatOscId) { cancelAnimationFrame(splatOscId); splatOscId = null; }
+    if (splatViewer) { try { splatViewer.dispose(); } catch(e) {} splatViewer = null; }
+
+    const container = document.getElementById('splatContainer');
+    const canvas = document.getElementById('splatCanvas');
+    const w = container.clientWidth || 800;
+    const h = Math.round(w * 0.6);
+    canvas.width = w; canvas.height = h;
+
+    let renderer, camera, viewer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, preserveDrawingBuffer: true });
+      renderer.setSize(w, h, false);
+      camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 500);
+      camera.position.set(0, 0, 5);
+      viewer = new GS3D.Viewer({
+        selfDrivenMode: false,
+        useBuiltInControls: false,
+        sharedMemoryForWorkers: false,
+        rootElement: container,
+        renderer,
+        camera,
+      });
+    } catch (err) {
+      console.error('splat viewer init failed:', err);
+      setStatus('splat viewer init failed — check console', 'error');
+      return;
+    }
+    splatViewer = viewer;
+    splatCamera = camera;
+    splatRenderer = renderer;
+    document.getElementById('splatContainer').style.display = 'block';
+
+    // blob URLs have no extension — pass format explicitly so the library doesn't guess
+    const format = GS3D.SceneFormat?.Ply ?? 2;
+    const blobUrl = URL.createObjectURL(file);
+    setStatus('loading splat scene...', 'working');
+    try {
+      await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
+    } catch (err) {
+      console.error('splat scene load failed:', err);
+      setStatus('failed to load .ply: ' + err.message, 'error');
+      URL.revokeObjectURL(blobUrl);
+      return;
+    }
+    URL.revokeObjectURL(blobUrl);
+
+    splatBasePos = camera.position.clone();
+    document.getElementById('splatUploadBtn').classList.add('loaded');
+    document.getElementById('splatUploadBtn').querySelector('.label-text').textContent = file.name;
+
+    setStatus('splat loaded — oscillating', 'done');
+    startSplatOscillation();
+  }
+
+  function startSplatOscillation() {
+    if (!splatViewer || !splatCamera) return;
+    const startTime = performance.now();
+    const freq = 1.0;
+
+    function tick() {
+      const t = (performance.now() - startTime) / 1000;
+      const amplitude = PARAMS.baseline * Math.PI / 180;
+      const angle = Math.sin(t * freq * 2 * Math.PI) * amplitude;
+      const dist = Math.sqrt(splatBasePos.x ** 2 + splatBasePos.z ** 2) || 5;
+      splatCamera.position.x = Math.sin(angle) * dist;
+      splatCamera.position.y = splatBasePos.y;
+      splatCamera.position.z = Math.cos(angle) * dist;
+      splatCamera.lookAt(0, 0, 0);
+      splatViewer.update();
+      splatViewer.render();
+      splatOscId = requestAnimationFrame(tick);
+    }
+    splatOscId = requestAnimationFrame(tick);
+  }
+
+  window.recordSplatGif = async function() {
+    if (!splatViewer || !splatCamera || !splatRenderer) {
+      setStatus('load a .ply file first', 'error'); return;
+    }
+    if (splatOscId) { cancelAnimationFrame(splatOscId); splatOscId = null; }
+
+    const numFrames = PARAMS.frames;
+    const frameDelay = PARAMS.frameDelay;
+    const amplitude = PARAMS.baseline * Math.PI / 180;
+    const canvas = document.getElementById('splatCanvas');
+
+    setStatus('loading gif encoder...', 'working');
+    let workerUrl;
+    try {
+      const resp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js');
+      const code = await resp.text();
+      workerUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+    } catch(e) {
+      setStatus('could not load gif encoder: ' + e.message, 'error');
+      startSplatOscillation(); return;
+    }
+
+    const gif = new GIF({
+      workers: 2, quality: 8, workerScript: workerUrl,
+      width: canvas.width, height: canvas.height, repeat: 0
+    });
+
+    for (let i = 0; i < numFrames; i++) {
+      const angle = Math.sin((i / numFrames) * 2 * Math.PI) * amplitude;
+      const dist = Math.sqrt(splatBasePos.x ** 2 + splatBasePos.z ** 2) || 5;
+      splatCamera.position.x = Math.sin(angle) * dist;
+      splatCamera.position.y = splatBasePos.y;
+      splatCamera.position.z = Math.cos(angle) * dist;
+      splatCamera.lookAt(0, 0, 0);
+      splatViewer.update();
+      splatViewer.render();
+      await new Promise(r => setTimeout(r, 16));
+      gif.addFrame(canvas, { delay: frameDelay, copy: true });
+      setStatus(`capturing frame ${i + 1}/${numFrames}`, 'working');
+      setProgress(Math.round(((i + 1) / numFrames) * 50));
+    }
+
+    gif.on('progress', p => {
+      setProgress(50 + Math.round(p * 50));
+      setStatus(`encoding  ${Math.round(p * 100)}%`, 'working');
+    });
+    gif.on('finished', blob => {
+      URL.revokeObjectURL(workerUrl);
+      showGifPreview(blob);
+      const kb = Math.round(blob.size / 1024);
+      setStatus(`done  ·  ${canvas.width}×${canvas.height}  ·  ${numFrames}f  ·  ${kb}kb`, 'done');
+      setProgress(-1);
+      startSplatOscillation();
+    });
     gif.render();
   };
 </script>

@@ -1,3 +1,14 @@
-Any-Resolution-Any-Geometry
-Depth-Anything-V2
-free-blue-noise-textures
+# project folders
+.claude/
+.vscode/
+
+# models
+Any-Resolution-Any-Geometry/
+Depth-Anything-V2/
+ml-sharp/
+
+# extras
+free-blue-noise-textures/
+
+# test files
+test-images/
