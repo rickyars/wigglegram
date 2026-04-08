@@ -697,6 +697,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
       if (this.depthTarget) { this.depthTarget.dispose(); this.depthTarget = null; }
       if (this.depthReadTarget) { this.depthReadTarget.dispose(); this.depthReadTarget = null; }
+      if (this.depthMaterial) { this.depthMaterial.dispose(); this.depthMaterial = null; }
     }
 
     async load(file, paneCanvas) {
@@ -820,7 +821,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         this.camera.lookAt(0, this.basePos.y, 0);
       } else if (mode === 'warp') {
         this.camera.position.copy(this.basePos);
-        this.camera.rotation.set(0, angle * 0.05, 0);
+        this.camera.rotation.set(0, angle, 0);
       }
     }
 
