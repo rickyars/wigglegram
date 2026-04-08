@@ -206,7 +206,7 @@
   }
   .upload-btn input { display: none; }
 
-  #depthUploadBtn { display: flex; }
+  #depthSourceBtn { display: flex; }
   /* ─── TWEAKPANE CONTAINER ─────────────────────────────────── */
   #tweakpane-container {
     width: 100%;
@@ -217,7 +217,8 @@
   }
 
   /* ─── GENERATE BUTTON ─────────────────────────────────────── */
-  button#generateBtn {
+  button#generateBtn,
+  button#previewBtn {
     background: transparent;
     border: 1px solid var(--green);
     color: var(--green);
@@ -230,11 +231,13 @@
     transition: all 0.15s;
     width: 100%;
   }
-  button#generateBtn:hover:not(:disabled) {
+  button#generateBtn:hover:not(:disabled),
+  button#previewBtn:hover:not(:disabled) {
     background: var(--green);
     color: #000;
   }
-  button#generateBtn:disabled {
+  button#generateBtn:disabled,
+  button#previewBtn:disabled {
     border-color: var(--border-active);
     color: var(--text-dim);
     cursor: not-allowed;
@@ -311,7 +314,7 @@
       </div>
       <div class="preview-panel">
         <div class="preview-label">
-          <span id="depthSourceLabel">depth map (luminance proxy)</span>
+          <span id="depthPaneLabel">depth (luminance)</span>
           <a href="#" id="clearDepth" class="clear-link" style="display:none" onclick="clearCustomDepth(event)">[clear]</a>
         </div>
         <canvas id="depthCanvas"></canvas>
@@ -324,14 +327,6 @@
         <button class="download-btn" id="downloadBtn" onclick="downloadGif()">download</button>
       </div>
       <img id="gifPreview" alt="generated wigglegram">
-    </div>
-
-    <div id="splatContainer" style="display:none; border: 1px solid var(--border); overflow:hidden;">
-      <div class="preview-label">
-        <span>splat viewer</span>
-        <button class="download-btn" id="recordSplatBtn" onclick="recordSplatGif()">record gif</button>
-      </div>
-      <canvas id="splatCanvas" style="display:block; width:100%; background:#000;"></canvas>
     </div>
 
     <div class="status" id="status">load an image to begin</div>
@@ -362,21 +357,19 @@ sharp predict -i your_image.jpg -o output/</pre>
         <span class="label-text">Upload Source Image</span>
         <input type="file" id="fileInput" accept="image/*">
       </label>
-      <label class="upload-btn" id="depthUploadBtn">
-        <span class="label-text">Upload Depth Map (optional)</span>
-        <input type="file" id="depthInput" accept="image/*">
+      <label class="upload-btn" id="depthSourceBtn">
+        <span class="label-text">Upload Depth Source (optional)</span>
+        <a href="#" id="clearDepthSource" class="clear-link" style="display:none" onclick="clearDepthSource(event)">[clear]</a>
+        <input type="file" id="depthSourceInput" accept="image/*,.ply">
       </label>
-      <div id="splatUploadRow">
-        <label class="upload-btn" id="splatUploadBtn">
-          <span class="label-text">Upload Splat (.ply)</span>
-          <input type="file" id="splatInput">
-        </label>
-      </div>
     </div>
 
     <div id="tweakpane-container"></div>
 
-    <button id="generateBtn" disabled onclick="generate()">generate gif</button>
+    <div style="display:flex; flex-direction:column; gap:0.5rem;">
+      <button id="previewBtn" disabled onclick="generatePreview()">generate preview</button>
+      <button id="generateBtn" disabled onclick="generate()">generate gif</button>
+    </div>
   </div>
 </div>
 
