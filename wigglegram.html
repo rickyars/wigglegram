@@ -674,6 +674,238 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
   }
 
+  class SplatDepthSource {
+    constructor() {
+      this.file = null;
+      this.viewer = null;
+      this.camera = null;
+      this.renderer = null;
+      this.basePos = null;
+      this.oscId = null;
+      this.depthTarget = null;
+      this.depthReadTarget = null;
+      this.depthMaterial = null;
+    }
+
+    stopOscillation() {
+      if (this.oscId) { cancelAnimationFrame(this.oscId); this.oscId = null; }
+    }
+
+    dispose() {
+      this.stopOscillation();
+      if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
+      if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
+      if (this.depthTarget) { this.depthTarget.dispose(); this.depthTarget = null; }
+      if (this.depthReadTarget) { this.depthReadTarget.dispose(); this.depthReadTarget = null; }
+    }
+
+    async load(file, paneCanvas) {
+      this.stopOscillation();
+      if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
+      if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
+      if (this.depthTarget) { this.depthTarget.dispose(); this.depthTarget = null; }
+      if (this.depthReadTarget) { this.depthReadTarget.dispose(); this.depthReadTarget = null; }
+
+      this.file = file;
+
+      setStatus('loading splat libraries...', 'working');
+      let THREE, GS3D;
+      try {
+        THREE = await import('three');
+        GS3D = await import('@mkkellogg/gaussian-splats-3d');
+      } catch (err) {
+        console.error('splat library load failed:', err);
+        setStatus('failed to load splat libraries — check console', 'error');
+        return;
+      }
+
+      const container = paneCanvas.parentElement;
+      const w = (container ? container.clientWidth : paneCanvas.clientWidth) || 800;
+      const h = Math.max(Math.round(w * 0.6), 300);
+      paneCanvas.width = w;
+      paneCanvas.height = h;
+
+      let renderer, camera, viewer;
+      try {
+        renderer = new THREE.WebGLRenderer({ canvas: paneCanvas, antialias: true, preserveDrawingBuffer: true });
+        renderer.setSize(w, h, false);
+        camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 500);
+        camera.position.set(0, 0, 5);
+        viewer = new GS3D.Viewer({
+          selfDrivenMode: false,
+          useBuiltInControls: false,
+          sharedMemoryForWorkers: false,
+          renderer,
+          camera,
+        });
+      } catch (err) {
+        console.error('splat viewer init failed:', err);
+        setStatus('splat viewer init failed — check console', 'error');
+        return;
+      }
+
+      const format = GS3D.SceneFormat?.Ply ?? 2;
+      const blobUrl = URL.createObjectURL(file);
+      setStatus('loading splat scene...', 'working');
+      try {
+        await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
+      } catch (err) {
+        console.error('splat scene load failed:', err);
+        setStatus('failed to load .ply: ' + err.message, 'error');
+        URL.revokeObjectURL(blobUrl);
+        return;
+      }
+      URL.revokeObjectURL(blobUrl);
+
+      this.viewer = viewer;
+      this.camera = camera;
+      this.renderer = renderer;
+      this.basePos = camera.position.clone();
+
+      // Depth extraction render targets
+      this.depthTarget = new THREE.WebGLRenderTarget(w, h, {
+        depthBuffer: true,
+        depthTexture: new THREE.DepthTexture(w, h, THREE.FloatType),
+      });
+
+      this.depthReadTarget = new THREE.WebGLRenderTarget(w, h, {
+        type: THREE.FloatType,
+      });
+
+      // Full-screen quad material for linearizing depth
+      this.depthMaterial = new THREE.ShaderMaterial({
+        uniforms: {
+          depthTex: { value: this.depthTarget.depthTexture },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D depthTex;
+          varying vec2 vUv;
+          void main() {
+            float z = texture2D(depthTex, vUv).r;
+            float near = 0.1;
+            float far = 500.0;
+            float linear = (2.0 * near * far) / (far + near - (z * 2.0 - 1.0) * (far - near));
+            gl_FragColor = vec4(linear / far, 0.0, 0.0, 1.0);
+          }
+        `,
+        depthWrite: false,
+        depthTest: false,
+      });
+
+      this.startOscillation(PARAMS.mode, PARAMS);
+      setStatus('splat loaded', 'done');
+    }
+
+    renderToPane(canvas) {
+      // no-op: live render already running via rAF loop
+    }
+
+    positionCamera(mode, angle, params) {
+      const dist = this.basePos.length() || 5;
+      if (mode === 'orbit') {
+        this.camera.position.x = Math.sin(angle) * dist;
+        this.camera.position.y = this.basePos.y;
+        this.camera.position.z = Math.cos(angle) * dist;
+        this.camera.lookAt(0, 0, 0);
+      } else if (mode === 'parallax') {
+        this.camera.position.copy(this.basePos);
+        this.camera.position.x = this.basePos.x + Math.sin(angle) * params.baseline * 0.05;
+        this.camera.lookAt(0, this.basePos.y, 0);
+      } else if (mode === 'warp') {
+        this.camera.position.copy(this.basePos);
+        this.camera.rotation.set(0, angle * 0.05, 0);
+      }
+    }
+
+    startOscillation(mode, params) {
+      this.stopOscillation();
+      if (!this.viewer || !this.camera) return;
+      const startTime = performance.now();
+      const tick = () => {
+        const t = (performance.now() - startTime) / 1000;
+        const angle = Math.sin(t * 2 * Math.PI) * (params.baseline * Math.PI / 180);
+        this.positionCamera(mode, angle, params);
+        this.viewer.update();
+        this.viewer.render();
+        this.oscId = requestAnimationFrame(tick);
+      };
+      this.oscId = requestAnimationFrame(tick);
+    }
+
+    async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
+      if (!this.viewer || !this.camera || !this.renderer) return null;
+
+      const THREE = await import('three');
+      const w = this.renderer.domElement.width;
+      const h = this.renderer.domElement.height;
+
+      const rawAngle = (frameIndex / totalFrames) * 2 * Math.PI;
+      const angle = Math.sin(rawAngle) * (params.baseline * Math.PI / 180);
+      this.positionCamera(mode, angle, params);
+
+      // Render color to default framebuffer
+      this.renderer.setRenderTarget(null);
+      this.viewer.update();
+      this.viewer.render();
+
+      // Read color pixels (WebGL reads bottom-to-top, needs flip)
+      const gl = this.renderer.getContext();
+      const colorPixelsRaw = new Uint8ClampedArray(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, colorPixelsRaw);
+
+      // Flip colorPixels vertically
+      const colorData = new Uint8ClampedArray(w * h * 4);
+      for (let y = 0; y < h; y++) {
+        const srcRow = (h - 1 - y) * w * 4;
+        const dstRow = y * w * 4;
+        colorData.set(colorPixelsRaw.subarray(srcRow, srcRow + w * 4), dstRow);
+      }
+
+      // Render to depthTarget to capture depth buffer
+      this.renderer.setRenderTarget(this.depthTarget);
+      this.viewer.update();
+      this.viewer.render();
+      this.renderer.setRenderTarget(null);
+
+      // Render linearized depth to depthReadTarget using full-screen quad
+      const quadGeo = new THREE.PlaneGeometry(2, 2);
+      const quadMesh = new THREE.Mesh(quadGeo, this.depthMaterial);
+      const depthScene = new THREE.Scene();
+      depthScene.add(quadMesh);
+      const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+
+      this.renderer.setRenderTarget(this.depthReadTarget);
+      this.renderer.render(depthScene, orthoCamera);
+      this.renderer.setRenderTarget(null);
+
+      // Cleanup temporary objects
+      quadGeo.dispose();
+
+      // Read depth pixels
+      const depthPixelsRaw = new Float32Array(w * h * 4);
+      this.renderer.readRenderTargetPixels(this.depthReadTarget, 0, 0, w, h, depthPixelsRaw);
+
+      // Extract red channel and flip vertically
+      const depthArray = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) {
+        const srcRow = (h - 1 - y) * w;
+        const dstRow = y * w;
+        for (let x = 0; x < w; x++) {
+          depthArray[dstRow + x] = depthPixelsRaw[(srcRow + x) * 4];
+        }
+      }
+
+      return { colorData, depthArray, width: w, height: h };
+    }
+  }
+
   setupTweakpane();
 
   // ─── FILE UPLOAD HANDLERS ──────────────────────────────────────────────────
@@ -698,10 +930,18 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     if (isPly) {
       pendingSplatFile = file;
-      activeDepthSource = null;
       updateDepthPaneLabel('splat (loading...)');
       depthSourceBtn.querySelector('.label-text').textContent = file.name;
       depthSourceBtn.classList.add('loaded');
+      const splatSrc = new SplatDepthSource();
+      activeDepthSource = splatSrc;
+      setStatus('loading splat...', 'working');
+      splatSrc.load(file, depthPaneCanvas).then(() => {
+        updateDepthPaneLabel('splat (live)');
+      }).catch(err => {
+        console.error('splat load error:', err);
+        setStatus('splat load failed — check console', 'error');
+      });
       return;
     }
 
@@ -831,6 +1071,9 @@ sharp predict -i your_image.jpg -o output/</pre>
     e.preventDefault();
     if (!srcImageData) return;
 
+    if (activeDepthSource instanceof SplatDepthSource) {
+      activeDepthSource.dispose();
+    }
     pendingSplatFile = null;
     activeDepthSource = new LuminanceDepthSource(srcImageData);
     activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
@@ -1338,49 +1581,69 @@ sharp predict -i your_image.jpg -o output/</pre>
     setStatus('scaling image...', 'working');
     setProgress(0);
 
-    // Scale source image
-    let width = srcImageData.width;
-    let height = srcImageData.height;
-    let scaledSrc = srcImageData;
+    // SplatDepthSource provides its own color+depth — skip image scaling and depth computation
+    const isSplat = activeDepthSource instanceof SplatDepthSource;
 
-    if (width > targetWidth) {
-      const scale = targetWidth / width;
-      width = Math.round(srcImageData.width * scale);
-      height = Math.round(srcImageData.height * scale);
-
-      const tmp = document.createElement('canvas');
-      tmp.width = width; tmp.height = height;
-      const ctx = tmp.getContext('2d');
-      ctx.drawImage(document.getElementById('srcCanvas'), 0, 0, width, height);
-      scaledSrc = ctx.getImageData(0, 0, width, height);
+    if (isSplat && !activeDepthSource.viewer) {
+      setStatus('splat not fully loaded yet — please wait', 'error');
+      previewBtn.disabled = false;
+      generateBtn.disabled = false;
+      return;
     }
 
-    // Compute depth at scaled resolution from activeDepthSource
-    const invert = PARAMS.invertDepth;
-    let depth;
+    let width, height, scaledSrc, depth, blurredSrc;
 
-    if (activeDepthSource instanceof ImageDepthSource) {
-      const rawCanvas = document.createElement('canvas');
-      rawCanvas.width = activeDepthSource.depthImageData.width;
-      rawCanvas.height = activeDepthSource.depthImageData.height;
-      rawCanvas.getContext('2d').putImageData(activeDepthSource.depthImageData, 0, 0);
-      const tmp = document.createElement('canvas');
-      tmp.width = width; tmp.height = height;
-      const ctx = tmp.getContext('2d');
-      ctx.drawImage(rawCanvas, 0, 0, width, height);
-      const scaledDepthData = ctx.getImageData(0, 0, width, height);
-      depth = computeLuminanceDepth(scaledDepthData, invert);
+    if (!isSplat) {
+      // Scale source image
+      width = srcImageData.width;
+      height = srcImageData.height;
+      scaledSrc = srcImageData;
+
+      if (width > targetWidth) {
+        const scale = targetWidth / width;
+        width = Math.round(srcImageData.width * scale);
+        height = Math.round(srcImageData.height * scale);
+
+        const tmp = document.createElement('canvas');
+        tmp.width = width; tmp.height = height;
+        const ctx = tmp.getContext('2d');
+        ctx.drawImage(document.getElementById('srcCanvas'), 0, 0, width, height);
+        scaledSrc = ctx.getImageData(0, 0, width, height);
+      }
+
+      // Compute depth at scaled resolution from activeDepthSource
+      const invert = PARAMS.invertDepth;
+
+      if (activeDepthSource instanceof ImageDepthSource) {
+        const rawCanvas = document.createElement('canvas');
+        rawCanvas.width = activeDepthSource.depthImageData.width;
+        rawCanvas.height = activeDepthSource.depthImageData.height;
+        rawCanvas.getContext('2d').putImageData(activeDepthSource.depthImageData, 0, 0);
+        const tmp = document.createElement('canvas');
+        tmp.width = width; tmp.height = height;
+        const ctx = tmp.getContext('2d');
+        ctx.drawImage(rawCanvas, 0, 0, width, height);
+        const scaledDepthData = ctx.getImageData(0, 0, width, height);
+        depth = computeLuminanceDepth(scaledDepthData, invert);
+      } else {
+        // LuminanceDepthSource: compute from scaled source
+        depth = computeLuminanceDepth(scaledSrc, invert);
+      }
+      const depthSmoothR = Math.min(cocScale, 4);
+      depth = boxBlur(depth, width, height, depthSmoothR);
+      depth = boxBlur(depth, width, height, depthSmoothR);
+
+      // Pre-blur source proportional to depth (background blurs, foreground stays sharp)
+      const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
+      blurredSrc = { data: blurredSrcData, width, height };
     } else {
-      // LuminanceDepthSource: compute from scaled source
-      depth = computeLuminanceDepth(scaledSrc, invert);
+      // For splat: dimensions come from the renderer
+      width = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.width : 800;
+      height = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.height : 480;
+      scaledSrc = null;
+      depth = null;
+      blurredSrc = null;
     }
-    const depthSmoothR = Math.min(cocScale, 4);
-    depth = boxBlur(depth, width, height, depthSmoothR);
-    depth = boxBlur(depth, width, height, depthSmoothR);
-
-    // Pre-blur source proportional to depth (background blurs, foreground stays sharp)
-    const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
-    const blurredSrc = { data: blurredSrcData, width, height };
 
     setStatus('loading gif encoder...', 'working');
 
@@ -1395,6 +1658,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       previewBtn.disabled = false;
       return;
     }
+
+    // Pause splat oscillation during capture
+    if (isSplat) activeDepthSource.stopOscillation();
 
     const gif = new GIF({
       workers: 2,
@@ -1441,6 +1707,11 @@ sharp predict -i your_image.jpg -o output/</pre>
     gif.on('finished', blob => {
       URL.revokeObjectURL(workerUrl);
       showGifPreview(blob);
+
+      // Resume splat oscillation after capture
+      if (isSplat && activeDepthSource instanceof SplatDepthSource) {
+        activeDepthSource.startOscillation(PARAMS.mode, PARAMS);
+      }
 
       const kb = Math.round(blob.size / 1024);
       setStatus(`done  \u00b7  ${width}\u00d7${height}  \u00b7  ${numFrames}f  \u00b7  ${kb}kb`, 'done');
