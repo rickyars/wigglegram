@@ -337,7 +337,7 @@
     <div class="note">
       bright pixels = near (unless inverted). for a real depth map, run
       <a href="https://github.com/Dreamaker-MrC/Any-Resolution-Any-Geometry" target="_blank">ARAG</a>
-      locally and supply the output via the depth map upload button.
+      locally and supply the output via the depth map upload button. the Depth Source button also accepts .ply splat files.
     </div>
 
     <details id="mlsharpHelp" style="display:none; margin-top:0.5rem; border-left: 2px solid var(--border-active); padding: 0.75rem 1rem; color: var(--text-dim); font-size: 0.72rem; line-height: 1.7;">
@@ -346,7 +346,7 @@
 cd ml-sharp
 pip install -e .
 sharp predict -i your_image.jpg -o output/</pre>
-      <div style="margin-top:0.4rem;">produces <code>output/your_image.ply</code>. use <b>splat wiggle</b> mode to load it.</div>
+      <div style="margin-top:0.4rem;">produces <code>output/your_image.ply</code>. upload the .ply via the Depth Source button to load it.</div>
     </details>
   </div>
 
