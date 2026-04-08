@@ -405,6 +405,8 @@ sharp predict -i your_image.jpg -o output/</pre>
   let srcImageData = null;
   let customDepthData = null;
   let customDepthFilename = null;
+  let activeDepthSource = null;
+  let pendingSplatFile = null;
   let currentDepthMap = null;
   let blueNoise = null;
   let gifBlobUrl = null;
@@ -558,6 +560,120 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
   }
 
+  class LuminanceDepthSource {
+    constructor(srcImageData) {
+      this.srcImageData = srcImageData;
+    }
+
+    renderToPane(canvas) {
+      const depth = getDepthMap(this.srcImageData);
+      canvas.width = this.srcImageData.width;
+      canvas.height = this.srcImageData.height;
+      const ctx = canvas.getContext('2d');
+      const img = ctx.createImageData(this.srcImageData.width, this.srcImageData.height);
+      for (let i = 0; i < depth.length; i++) {
+        const v = Math.round(depth[i] * 255);
+        img.data[i * 4] = v;
+        img.data[i * 4 + 1] = v;
+        img.data[i * 4 + 2] = v;
+        img.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
+      const angle = (frameIndex / totalFrames) * 2 * Math.PI;
+      const xOffset = params.baseline * Math.sin(angle);
+      const width = scaledSrc.width;
+      const height = scaledSrc.height;
+      let colorData;
+
+      if (mode === 'orbit') {
+        colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
+      } else if (mode === 'parallax') {
+        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+      } else if (mode === 'warp') {
+        colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
+      } else {
+        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+      }
+
+      return {
+        colorData,
+        depthArray: scaledDepth,
+        width,
+        height,
+      };
+    }
+  }
+
+  class ImageDepthSource {
+    constructor(depthImageData) {
+      this.depthImageData = depthImageData;
+    }
+
+    renderToPane(canvas) {
+      const width = canvas.width || this.depthImageData.width;
+      const height = canvas.height || this.depthImageData.height;
+      canvas.width = width;
+      canvas.height = height;
+
+      const rawCanvas = document.createElement('canvas');
+      rawCanvas.width = this.depthImageData.width;
+      rawCanvas.height = this.depthImageData.height;
+      rawCanvas.getContext('2d').putImageData(this.depthImageData, 0, 0);
+
+      const scaledCanvas = document.createElement('canvas');
+      scaledCanvas.width = width;
+      scaledCanvas.height = height;
+      const scaledCtx = scaledCanvas.getContext('2d');
+      scaledCtx.drawImage(rawCanvas, 0, 0, width, height);
+      const scaledDepthData = scaledCtx.getImageData(0, 0, width, height);
+
+      const invert = PARAMS.invertDepth;
+      const smoothR = Math.min(PARAMS.bokehCoc, 4);
+      let depth = computeLuminanceDepth(scaledDepthData, invert);
+      depth = boxBlur(depth, width, height, smoothR);
+      depth = boxBlur(depth, width, height, smoothR);
+
+      const ctx = canvas.getContext('2d');
+      const img = ctx.createImageData(width, height);
+      for (let i = 0; i < depth.length; i++) {
+        const v = Math.round(depth[i] * 255);
+        img.data[i * 4] = v;
+        img.data[i * 4 + 1] = v;
+        img.data[i * 4 + 2] = v;
+        img.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
+    }
+
+    async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
+      const angle = (frameIndex / totalFrames) * 2 * Math.PI;
+      const xOffset = params.baseline * Math.sin(angle);
+      const width = scaledSrc.width;
+      const height = scaledSrc.height;
+      let colorData;
+
+      if (mode === 'orbit') {
+        colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
+      } else if (mode === 'parallax') {
+        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+      } else if (mode === 'warp') {
+        colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
+      } else {
+        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+      }
+
+      return {
+        colorData,
+        depthArray: scaledDepth,
+        width,
+        height,
+      };
+    }
+  }
+
   setupTweakpane();
 
   // ─── FILE UPLOAD HANDLERS ──────────────────────────────────────────────────
@@ -565,8 +681,48 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (e.target.files[0]) loadSourceImage(e.target.files[0]);
   });
 
-  document.getElementById('depthInput').addEventListener('change', (e) => {
-    if (e.target.files[0]) loadCustomDepth(e.target.files[0]);
+  const legacyDepthInput = document.getElementById('depthInput');
+  if (legacyDepthInput) {
+    legacyDepthInput.addEventListener('change', (e) => {
+      if (e.target.files[0]) loadCustomDepth(e.target.files[0]);
+    });
+  }
+
+  document.getElementById('depthSourceInput').addEventListener('change', (e) => {
+    const file = e.target.files[0];
+    if (!file || !srcImageData) return;
+
+    const depthSourceBtn = document.getElementById('depthSourceBtn');
+    const depthPaneCanvas = document.getElementById('depthCanvas');
+    const isPly = file.name.toLowerCase().endsWith('.ply');
+
+    if (isPly) {
+      pendingSplatFile = file;
+      activeDepthSource = null;
+      updateDepthPaneLabel('splat (loading...)');
+      depthSourceBtn.querySelector('.label-text').textContent = file.name;
+      depthSourceBtn.classList.add('loaded');
+      return;
+    }
+
+    pendingSplatFile = null;
+    const img = new Image();
+    img.onload = () => {
+      const sw = srcImageData.width;
+      const sh = srcImageData.height;
+      const tmp = document.createElement('canvas');
+      tmp.width = sw;
+      tmp.height = sh;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(img, 0, 0, sw, sh);
+      const imageData = ctx.getImageData(0, 0, sw, sh);
+      activeDepthSource = new ImageDepthSource(imageData);
+      activeDepthSource.renderToPane(depthPaneCanvas);
+      updateDepthPaneLabel('depth (custom: ' + file.name + ')');
+      depthSourceBtn.querySelector('.label-text').textContent = file.name;
+      depthSourceBtn.classList.add('loaded');
+    };
+    img.src = URL.createObjectURL(file);
   });
 
   // ─── IMAGE LOADING ─────────────────────────────────────────────────────────
@@ -579,13 +735,16 @@ sharp predict -i your_image.jpg -o output/</pre>
       const ctx = canvas.getContext('2d');
       ctx.drawImage(img, 0, 0);
       srcImageData = ctx.getImageData(0, 0, img.width, img.height);
+      activeDepthSource = new LuminanceDepthSource(srcImageData);
+      activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+      pendingSplatFile = null;
       customDepthData = null;
       customDepthFilename = null;
-      updateDepthSourceLabel();
+      updateDepthPaneLabel('depth (luminance)');
 
       document.getElementById('previews').classList.add('visible');
-      document.getElementById('depthUploadBtn').classList.add('visible');
       document.getElementById('generateBtn').disabled = false;
+      document.getElementById('previewBtn').disabled = false;
 
       // Update source upload button
       const btn = document.getElementById('sourceUploadBtn');
@@ -593,11 +752,11 @@ sharp predict -i your_image.jpg -o output/</pre>
       btn.querySelector('.label-text').textContent = file.name;
 
       // Reset depth upload button
-      const depthBtn = document.getElementById('depthUploadBtn');
+      const depthBtn = document.getElementById('depthSourceBtn');
       depthBtn.classList.remove('loaded');
-      depthBtn.querySelector('.label-text').textContent = 'Upload Depth Map (optional)';
+      depthBtn.querySelector('.label-text').textContent = 'Upload Depth Source (optional)';
+      document.getElementById('depthSourceInput').value = '';
 
-      updateDepthPreview();
       setStatus('ready  \u00b7  ' + img.width + '\u00d7' + img.height, '');
     };
     img.src = URL.createObjectURL(file);
@@ -660,6 +819,28 @@ sharp predict -i your_image.jpg -o output/</pre>
       clearLink.style.display = 'none';
     }
   }
+
+  function updateDepthPaneLabel(text) {
+    const label = document.getElementById('depthPaneLabel');
+    const clearLink = document.getElementById('clearDepthSource');
+    if (label) label.textContent = text;
+    if (clearLink) clearLink.style.display = text === 'depth (luminance)' ? 'none' : 'inline';
+  }
+
+  window.clearDepthSource = function(e) {
+    e.preventDefault();
+    if (!srcImageData) return;
+
+    pendingSplatFile = null;
+    activeDepthSource = new LuminanceDepthSource(srcImageData);
+    activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+    updateDepthPaneLabel('depth (luminance)');
+
+    const depthSourceBtn = document.getElementById('depthSourceBtn');
+    depthSourceBtn.querySelector('.label-text').textContent = 'Upload Depth Source (optional)';
+    depthSourceBtn.classList.remove('loaded');
+    document.getElementById('depthSourceInput').value = '';
+  };
 
   // ─── CIRCULAR DISC BOKEH ───────────────────────────────────────────────────
   function circularDiscBokeh(srcData, depth, focusDist, cocScale, width, height) {
