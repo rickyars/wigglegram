@@ -677,6 +677,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.depthTarget = null;
       this.depthReadTarget = null;
       this.depthMaterial = null;
+      this._originalCanvas = null;
+      this._glCanvas = null;
     }
 
     stopOscillation() {
@@ -685,6 +687,14 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     dispose() {
       this.stopOscillation();
+      if (this._glCanvas && this._glCanvas.parentElement) {
+        this._glCanvas.parentElement.removeChild(this._glCanvas);
+      }
+      this._glCanvas = null;
+      if (this._originalCanvas) {
+        this._originalCanvas.style.display = '';
+        this._originalCanvas = null;
+      }
       if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
       if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
       if (this.depthTarget) { this.depthTarget.dispose(); this.depthTarget = null; }
@@ -715,12 +725,26 @@ sharp predict -i your_image.jpg -o output/</pre>
       const container = paneCanvas.parentElement;
       const w = (container ? container.clientWidth : paneCanvas.clientWidth) || 800;
       const h = Math.max(Math.round(w * 0.6), 300);
-      paneCanvas.width = w;
-      paneCanvas.height = h;
+      if (this._originalCanvas && this._originalCanvas !== paneCanvas) {
+        this._originalCanvas.style.display = '';
+      }
+      const glCanvas = document.createElement('canvas');
+      glCanvas.width = w;
+      glCanvas.height = h;
+      glCanvas.style.cssText = 'display:block;width:100%;background:#000;';
+      paneCanvas.style.display = 'none';
+      if (this._glCanvas && this._glCanvas.parentElement) {
+        this._glCanvas.parentElement.removeChild(this._glCanvas);
+      }
+      if (container) {
+        container.appendChild(glCanvas);
+      }
+      this._originalCanvas = paneCanvas;
+      this._glCanvas = glCanvas;
 
       let renderer, camera, viewer;
       try {
-        renderer = new THREE.WebGLRenderer({ canvas: paneCanvas, antialias: true, preserveDrawingBuffer: true });
+        renderer = new THREE.WebGLRenderer({ canvas: glCanvas, antialias: true, preserveDrawingBuffer: true });
         renderer.setSize(w, h, false);
         camera = new THREE.PerspectiveCamera(60, w / h, 0.1, 500);
         camera.position.set(0, 0, 5);
@@ -732,6 +756,14 @@ sharp predict -i your_image.jpg -o output/</pre>
           camera,
         });
       } catch (err) {
+        if (this._glCanvas && this._glCanvas.parentElement) {
+          this._glCanvas.parentElement.removeChild(this._glCanvas);
+        }
+        this._glCanvas = null;
+        if (this._originalCanvas) {
+          this._originalCanvas.style.display = '';
+          this._originalCanvas = null;
+        }
         console.error('splat viewer init failed:', err);
         setStatus('splat viewer init failed — check console', 'error');
         return;
@@ -743,6 +775,14 @@ sharp predict -i your_image.jpg -o output/</pre>
       try {
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
       } catch (err) {
+        if (this._glCanvas && this._glCanvas.parentElement) {
+          this._glCanvas.parentElement.removeChild(this._glCanvas);
+        }
+        this._glCanvas = null;
+        if (this._originalCanvas) {
+          this._originalCanvas.style.display = '';
+          this._originalCanvas = null;
+        }
         console.error('splat scene load failed:', err);
         setStatus('failed to load .ply: ' + err.message, 'error');
         URL.revokeObjectURL(blobUrl);
