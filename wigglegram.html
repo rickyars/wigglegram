@@ -790,21 +790,61 @@ sharp predict -i your_image.jpg -o output/</pre>
       try {
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
         const splatMesh = viewer.getSplatMesh();
-        const bbox = new THREE.Box3();
-        bbox.setFromObject(splatMesh);
-        if (!bbox.isEmpty()) {
-          const center = new THREE.Vector3();
+        let center = new THREE.Vector3(0, 0, 0);
+        let distance = 5;
+        
+        // Try GS3D's own bounding box method first (reads from CPU data, not GPU)
+        let bbox = null;
+        try {
+          if (typeof splatMesh.getBoundingBox === 'function') {
+            bbox = splatMesh.getBoundingBox();
+          } else if (typeof splatMesh.getSplatCenter === 'function') {
+            center = splatMesh.getSplatCenter();
+          }
+        } catch(e) {
+          console.warn('Could not get splat bounds from GS3D API:', e);
+        }
+        
+        // Fall back to Three.js Box3 from object (works if geometry has position attrs)
+        if (!bbox || bbox.isEmpty()) {
+          bbox = new THREE.Box3().setFromObject(splatMesh);
+        }
+        
+        if (bbox && !bbox.isEmpty()) {
           bbox.getCenter(center);
           const size = new THREE.Vector3();
           bbox.getSize(size);
           const maxDim = Math.max(size.x, size.y, size.z);
           const fovRad = (60 * Math.PI) / 180;
-          const distance = (maxDim / 2) / Math.tan(fovRad / 2) * 1.5;
-          camera.position.set(center.x, center.y, center.z + distance);
-          camera.lookAt(center);
-          this.basePos = camera.position.clone();
-          this._sceneCenter = center.clone();
+          distance = (maxDim / 2) / Math.tan(fovRad / 2) * 2.0;
+        } else {
+          // bbox failed -- try to infer from splat count and heuristic
+          console.warn('SplatDepthSource: bounding box empty, using heuristic camera placement');
+          // Try reading the scene's children for any object with geometry
+          viewer.threeScene && viewer.threeScene.traverse && viewer.threeScene.traverse((obj) => {
+            if (obj.isObject3D && obj !== splatMesh) {
+              try {
+                const b = new THREE.Box3().setFromObject(obj);
+                if (!b.isEmpty()) {
+                  b.getCenter(center);
+                  const s = new THREE.Vector3();
+                  b.getSize(s);
+                  const maxD = Math.max(s.x, s.y, s.z);
+                  if (maxD > 0) {
+                    const fovRad2 = (60 * Math.PI) / 180;
+                    distance = (maxD / 2) / Math.tan(fovRad2 / 2) * 2.0;
+                  }
+                }
+              } catch(e2) {}
+            }
+          });
         }
+        
+        camera.position.set(center.x, center.y, center.z + distance);
+        camera.lookAt(center.x, center.y, center.z);
+        this.basePos = camera.position.clone();
+        this._sceneCenter = center.clone();
+        console.log('[SplatDepthSource] camera auto-fit:', { center, distance });
       } catch (err) {
         if (this._glCanvas && this._glCanvas.parentElement) {
           this._glCanvas.parentElement.removeChild(this._glCanvas);
