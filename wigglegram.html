@@ -397,12 +397,12 @@ sharp predict -i your_image.jpg -o output/</pre>
     mode: 'orbit',
     baseline: 6.5,
     frames: 8,
-    frameDelay: 80,
+    frameDelay: 100,
     fov: 45,
-    bokehCoc: 8,
+    bokehCoc: 0,
     focusDist: 0.5,
-    lightWrap: 2,
-    chromaticAberr: 0.8,
+    lightWrap: 0,
+    chromaticAberr: 0,
     outputWidth: 800,
     invertDepth: false,
   };
@@ -1600,6 +1600,9 @@ sharp predict -i your_image.jpg -o output/</pre>
   async function runPipeline(targetWidth) {
     if (!srcImageData) return;
 
+    setStatus('starting...', 'working');
+    setProgress(0);
+
     const previewBtn = document.getElementById('previewBtn');
     const generateBtn = document.getElementById('generateBtn');
     previewBtn.disabled = true;
@@ -1750,6 +1753,14 @@ sharp predict -i your_image.jpg -o output/</pre>
     gif.on('progress', p => {
       setProgress(50 + Math.round(p * 50));
       setStatus(`encoding  ${Math.round(p * 100)}%`, 'working');
+    });
+
+    gif.on('error', (err) => {
+      console.error('GIF encoding error:', err);
+      setStatus('GIF encoding failed — check console', 'error');
+      setProgress(-1);
+      previewBtn.disabled = false;
+      generateBtn.disabled = false;
     });
 
     gif.on('finished', blob => {
