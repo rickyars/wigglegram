@@ -1733,11 +1733,16 @@ sharp predict -i your_image.jpg -o output/</pre>
     setStatus('scaling image...', 'working');
     setProgress(0);
 
-    // SplatDepthSource provides its own color+depth — skip image scaling and depth computation
-    const isSplat = activeDepthSource instanceof SplatDepthSource;
+    const isSplat3D = activeDepthSource instanceof SplatDepthSource && activeDepthSource.mode === '3d';
+    const isSplatDepth = activeDepthSource instanceof SplatDepthSource && activeDepthSource.mode === 'depth';
 
-    if (isSplat && !activeDepthSource.viewer) {
+    if (isSplat3D && !activeDepthSource.viewer) {
       setStatus('splat not fully loaded yet — please wait', 'error');
+      generateBtn.disabled = false;
+      return;
+    }
+    if (isSplatDepth && !activeDepthSource.bakedDepth) {
+      setStatus('splat depth not ready yet — please wait', 'error');
       generateBtn.disabled = false;
       return;
     }
@@ -1745,7 +1750,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     let width, height, scaledSrc, depth, blurredSrc;
     let origW = 800, origH = 480;
 
-    if (!isSplat) {
+    if (!isSplat3D) {
       // Scale source image
       width = srcImageData.width;
       height = srcImageData.height;
@@ -1777,6 +1782,13 @@ sharp predict -i your_image.jpg -o output/</pre>
         ctx.drawImage(rawCanvas, 0, 0, width, height);
         const scaledDepthData = ctx.getImageData(0, 0, width, height);
         depth = computeLuminanceDepth(scaledDepthData, invert);
+      } else if (isSplatDepth) {
+        depth = scaleBakedDepth(
+          activeDepthSource.bakedDepth,
+          activeDepthSource.bakedWidth,
+          activeDepthSource.bakedHeight,
+          width, height
+        );
       } else {
         // LuminanceDepthSource: compute from scaled source
         depth = computeLuminanceDepth(scaledSrc, invert);
@@ -1820,7 +1832,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     // Pause splat oscillation during capture
-    if (isSplat) activeDepthSource.stopOscillation();
+    if (isSplat3D) activeDepthSource.stopOscillation();
 
     const gif = new GIF({
       workers: 2,
@@ -1875,7 +1887,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       URL.revokeObjectURL(workerUrl);
       showGifPreview(blob);
 
-      if (isSplat && activeDepthSource && activeDepthSource.renderer && (width !== origW || height !== origH)) {
+      if (isSplat3D && activeDepthSource && activeDepthSource.renderer && (width !== origW || height !== origH)) {
         activeDepthSource.renderer.setSize(origW, origH, false);
         if (activeDepthSource.depthTarget) {
           activeDepthSource.depthTarget.setSize(origW, origH);
@@ -1884,7 +1896,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       }
 
       // Resume splat oscillation after capture
-      if (isSplat && activeDepthSource instanceof SplatDepthSource) {
+      if (isSplat3D && activeDepthSource instanceof SplatDepthSource) {
         activeDepthSource.startOscillation(PARAMS.mode, PARAMS);
       }
 
