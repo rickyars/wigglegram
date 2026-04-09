@@ -485,7 +485,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       },
     }).on('change', (ev) => {
       updateModeUI(ev.value);
-      if (activeDepthSource instanceof SplatDepthSource) {
+      if (activeDepthSource instanceof SplatDepthSource && activeDepthSource.mode === '3d') {
         activeDepthSource.stopOscillation();
         activeDepthSource.startOscillation(ev.value, PARAMS);
       }
@@ -1264,6 +1264,8 @@ sharp predict -i your_image.jpg -o output/</pre>
         ctx.drawImage(img, 0, 0);
         srcImageData = ctx.getImageData(0, 0, img.width, img.height);
         activeDepthSource = new LuminanceDepthSource(srcImageData);
+        hideSplatZoom();
+        document.getElementById('splatModeToggle').classList.remove('visible');
         activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
         pendingSplatFile = null;
         customDepthData = null;
@@ -1306,6 +1308,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (activeDepthSource instanceof SplatDepthSource) {
       activeDepthSource.dispose();
     }
+    hideSplatZoom();
+    document.getElementById('splatModeToggle').classList.remove('visible');
     pendingSplatFile = null;
     activeDepthSource = new LuminanceDepthSource(srcImageData);
     activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
