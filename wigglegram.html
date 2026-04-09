@@ -303,6 +303,7 @@
     <div class="gif-preview-panel" id="gifPreviewPanel">
       <div class="preview-label">
         <span>output</span>
+        <button class="download-btn" id="downloadBtn" onclick="downloadGif()">download</button>
       </div>
       <img id="gifPreview" alt="generated wigglegram">
     </div>
@@ -796,26 +797,8 @@ sharp predict -i your_image.jpg -o output/</pre>
           const fovRad = (60 * Math.PI) / 180;
           distance = (maxDim / 2) / Math.tan(fovRad / 2) * 2.0;
         } else {
-          // bbox failed -- try to infer from splat count and heuristic
-          console.warn('SplatDepthSource: bounding box empty, using heuristic camera placement');
-          // Try reading the scene's children for any object with geometry
-          viewer.threeScene && viewer.threeScene.traverse && viewer.threeScene.traverse((obj) => {
-            if (obj.isObject3D && obj !== splatMesh) {
-              try {
-                const b = new THREE.Box3().setFromObject(obj);
-                if (!b.isEmpty()) {
-                  b.getCenter(center);
-                  const s = new THREE.Vector3();
-                  b.getSize(s);
-                  const maxD = Math.max(s.x, s.y, s.z);
-                  if (maxD > 0) {
-                    const fovRad2 = (60 * Math.PI) / 180;
-                    distance = (maxD / 2) / Math.tan(fovRad2 / 2) * 2.0;
-                  }
-                }
-              } catch(e2) {}
-            }
-          });
+          console.warn('SplatDepthSource: using fixed fallback distance=3');
+          distance = 3;
         }
         
         camera.position.set(center.x, center.y, center.z + distance);
@@ -1567,7 +1550,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     img.src = gifBlobUrl;
     panel.classList.add('visible');
     document.getElementById('generateBtn').disabled = false;
-    downloadGif();
   }
 
   // Clean up on page unload
@@ -1654,18 +1636,13 @@ sharp predict -i your_image.jpg -o output/</pre>
       // For splat: resize to target width for capture, then restore after encoding
       origW = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.width : 800;
       origH = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.height : 480;
-      if (targetWidth < origW) {
-        const scale = targetWidth / origW;
-        width = targetWidth;
-        height = Math.round(origH * scale);
-        activeDepthSource.renderer.setSize(width, height, false);
-        if (activeDepthSource.depthTarget) {
-          activeDepthSource.depthTarget.setSize(width, height);
-          activeDepthSource.depthReadTarget.setSize(width, height);
-        }
-      } else {
-        width = origW;
-        height = origH;
+      const scale = targetWidth / origW;
+      width = targetWidth;
+      height = Math.round(origH * scale);
+      activeDepthSource.renderer.setSize(width, height, false);
+      if (activeDepthSource.depthTarget) {
+        activeDepthSource.depthTarget.setSize(width, height);
+        activeDepthSource.depthReadTarget.setSize(width, height);
       }
       scaledSrc = null;
       depth = null;
