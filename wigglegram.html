@@ -315,7 +315,6 @@
       <div class="preview-panel">
         <div class="preview-label">
           <span id="depthPaneLabel">depth (luminance)</span>
-          <a href="#" id="clearDepth" class="clear-link" style="display:none" onclick="clearCustomDepth(event)">[clear]</a>
         </div>
         <canvas id="depthCanvas"></canvas>
       </div>
@@ -488,7 +487,11 @@ sharp predict -i your_image.jpg -o output/</pre>
     optics.addBinding(PARAMS, 'bokehCoc', {
       label: 'bokeh coc',
       min: 0, max: 40, step: 1,
-    }).on('change', () => updateDepthPreview());
+    }).on('change', () => {
+      if (activeDepthSource && !(activeDepthSource instanceof SplatDepthSource)) {
+        activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+      }
+    });
 
     optics.addBinding(PARAMS, 'focusDist', {
       label: 'focus dist',
@@ -515,7 +518,11 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     output.addBinding(PARAMS, 'invertDepth', {
       label: 'invert depth',
-    }).on('change', () => updateDepthPreview());
+    }).on('change', () => {
+      if (activeDepthSource && !(activeDepthSource instanceof SplatDepthSource)) {
+        activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+      }
+    });
   }
 
   let savedParallaxShift = 20;
@@ -967,13 +974,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (e.target.files[0]) loadSourceImage(e.target.files[0]);
   });
 
-  const legacyDepthInput = document.getElementById('depthInput');
-  if (legacyDepthInput) {
-    legacyDepthInput.addEventListener('change', (e) => {
-      if (e.target.files[0]) loadCustomDepth(e.target.files[0]);
-    });
-  }
-
   document.getElementById('depthSourceInput').addEventListener('change', (e) => {
     const file = e.target.files[0];
     if (!file || !srcImageData) return;
@@ -1023,95 +1023,41 @@ sharp predict -i your_image.jpg -o output/</pre>
   function loadSourceImage(file) {
     const img = new Image();
     img.onload = () => {
-      const canvas = document.getElementById('srcCanvas');
-      canvas.width = img.width;
-      canvas.height = img.height;
-      const ctx = canvas.getContext('2d');
-      ctx.drawImage(img, 0, 0);
-      srcImageData = ctx.getImageData(0, 0, img.width, img.height);
-      activeDepthSource = new LuminanceDepthSource(srcImageData);
-      activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
-      pendingSplatFile = null;
-      customDepthData = null;
-      customDepthFilename = null;
-      updateDepthPaneLabel('depth (luminance)');
+      try {
+        const canvas = document.getElementById('srcCanvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        ctx.drawImage(img, 0, 0);
+        srcImageData = ctx.getImageData(0, 0, img.width, img.height);
+        activeDepthSource = new LuminanceDepthSource(srcImageData);
+        activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+        pendingSplatFile = null;
+        customDepthData = null;
+        customDepthFilename = null;
+        updateDepthPaneLabel('depth (luminance)');
 
-      document.getElementById('previews').classList.add('visible');
-      document.getElementById('generateBtn').disabled = true;
-      document.getElementById('previewBtn').disabled = false;
+        document.getElementById('previews').classList.add('visible');
+        document.getElementById('generateBtn').disabled = true;
+        document.getElementById('previewBtn').disabled = false;
 
-      // Update source upload button
-      const btn = document.getElementById('sourceUploadBtn');
-      btn.classList.add('loaded');
-      btn.querySelector('.label-text').textContent = file.name;
+        // Update source upload button
+        const btn = document.getElementById('sourceUploadBtn');
+        btn.classList.add('loaded');
+        btn.querySelector('.label-text').textContent = file.name;
 
-      // Reset depth upload button
-      const depthBtn = document.getElementById('depthSourceBtn');
-      depthBtn.classList.remove('loaded');
-      depthBtn.querySelector('.label-text').textContent = 'Upload Depth Source (optional)';
-      document.getElementById('depthSourceInput').value = '';
+        // Reset depth upload button
+        const depthBtn = document.getElementById('depthSourceBtn');
+        depthBtn.classList.remove('loaded');
+        depthBtn.querySelector('.label-text').textContent = 'Upload Depth Source (optional)';
+        document.getElementById('depthSourceInput').value = '';
 
-      setStatus('ready  \u00b7  ' + img.width + '\u00d7' + img.height, '');
-    };
-    img.src = URL.createObjectURL(file);
-  }
-
-  function loadCustomDepth(file) {
-    if (!srcImageData) return;
-    const img = new Image();
-    img.onload = () => {
-      const sw = srcImageData.width, sh = srcImageData.height;
-      const tooFar = Math.abs(img.width - sw) > 4 || Math.abs(img.height - sh) > 4;
-      if (tooFar) {
-        setStatus('depth map dimensions too different from source (' + sw + '\u00d7' + sh + ')', 'error');
-        return;
+        setStatus('ready  \u00b7  ' + img.width + '\u00d7' + img.height, '');
+      } catch(err) {
+        console.error('loadSourceImage onload error:', err);
       }
-      const tmp = document.createElement('canvas');
-      tmp.width = sw; tmp.height = sh;
-      const ctx = tmp.getContext('2d');
-      ctx.drawImage(img, 0, 0, sw, sh);
-      customDepthData = ctx.getImageData(0, 0, sw, sh);
-      customDepthFilename = file.name;
-      updateDepthSourceLabel();
-
-      // Update depth upload button
-      const btn = document.getElementById('depthUploadBtn');
-      btn.classList.add('loaded');
-      btn.querySelector('.label-text').textContent = file.name;
-
-      updateDepthPreview();
-      setStatus('using supplied depth map', 'done');
     };
     img.src = URL.createObjectURL(file);
-  }
-
-  window.clearCustomDepth = function(e) {
-    e.preventDefault();
-    customDepthData = null;
-    customDepthFilename = null;
-    document.getElementById('depthInput').value = '';
-    updateDepthSourceLabel();
-
-    const btn = document.getElementById('depthUploadBtn');
-    btn.classList.remove('loaded');
-    btn.querySelector('.label-text').textContent = 'Upload Depth Map (optional)';
-
-    updateDepthPreview();
-    setStatus('reverted to luminance depth', '');
-  };
-
-  function updateDepthSourceLabel() {
-    const label = document.getElementById('depthSourceLabel');
-    const clearLink = document.getElementById('clearDepth');
-    if (customDepthData && customDepthFilename) {
-      label.textContent = 'depth map (custom: ' + customDepthFilename + ')';
-      label.style.color = 'var(--green)';
-      clearLink.style.display = 'inline';
-    } else {
-      label.textContent = 'depth map (luminance proxy)';
-      label.style.color = '';
-      clearLink.style.display = 'none';
-    }
   }
 
   function updateDepthPaneLabel(text) {
@@ -1401,27 +1347,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     d = boxBlur(d, imageData.width, imageData.height, smoothR);
     return d;
   }
-
-  function updateDepthPreview() {
-    if (!srcImageData) return;
-    const depth = getDepthMap(srcImageData);
-    currentDepthMap = depth;
-
-    const canvas = document.getElementById('depthCanvas');
-    canvas.width = srcImageData.width;
-    canvas.height = srcImageData.height;
-    const ctx = canvas.getContext('2d');
-    const img = ctx.createImageData(srcImageData.width, srcImageData.height);
-    for (let i = 0; i < depth.length; i++) {
-      const v = Math.round(depth[i] * 255);
-      img.data[i * 4] = v;
-      img.data[i * 4 + 1] = v;
-      img.data[i * 4 + 2] = v;
-      img.data[i * 4 + 3] = 255;
-    }
-    ctx.putImageData(img, 0, 0);
-  }
-
   // ─── FRAME GENERATION ──────────────────────────────────────────────────────
   const NUM_DEPTH_PASSES = 32;
 
@@ -1784,8 +1709,6 @@ sharp predict -i your_image.jpg -o output/</pre>
   window.generatePreview = async function() {
     await runPipeline(400);
   };
-
-  // ─── LEGACY SPLAT CODE REMOVED — replaced by SplatDepthSource class ────────
 </script>
 </body>
 </html>
