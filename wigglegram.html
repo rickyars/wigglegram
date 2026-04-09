@@ -573,6 +573,30 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
   }
 
+  function scaleBakedDepth(depth, srcW, srcH, dstW, dstH) {
+    const src = document.createElement('canvas');
+    src.width = srcW; src.height = srcH;
+    const sCtx = src.getContext('2d');
+    const imgData = sCtx.createImageData(srcW, srcH);
+    for (let i = 0; i < depth.length; i++) {
+      const v = Math.round(depth[i] * 255);
+      imgData.data[i * 4]     = v;
+      imgData.data[i * 4 + 1] = v;
+      imgData.data[i * 4 + 2] = v;
+      imgData.data[i * 4 + 3] = 255;
+    }
+    sCtx.putImageData(imgData, 0, 0);
+    const dst = document.createElement('canvas');
+    dst.width = dstW; dst.height = dstH;
+    dst.getContext('2d').drawImage(src, 0, 0, dstW, dstH);
+    const scaled = dst.getContext('2d').getImageData(0, 0, dstW, dstH);
+    const out = new Float32Array(dstW * dstH);
+    for (let i = 0; i < out.length; i++) {
+      out[i] = scaled.data[i * 4] / 255;
+    }
+    return out;
+  }
+
   class LuminanceDepthSource {
     constructor(srcImageData) {
       this.srcImageData = srcImageData;
