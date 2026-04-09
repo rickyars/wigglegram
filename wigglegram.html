@@ -824,7 +824,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           const sphere = new THREE.Sphere();
           bbox.getBoundingSphere(sphere);
           if (sphere.radius > 0) {
-            const fovRad = (Math.PI / 180) * 60;
+            const fovRad = (Math.PI / 180) * 60; // must match PerspectiveCamera FOV at line ~773
             autoFitDist = sphere.radius / Math.sin(fovRad / 2);
           }
         } else {
@@ -903,9 +903,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       // no-op: live render already running via rAF loop
     }
 
-    repositionCamera(distance) {
+    repositionCamera(zoomMultiplier) {
       if (!this.camera) return;
       const center = this._sceneCenter || { x: 0, y: 0, z: 0 };
+      const distance = (this._autoFitDist || 3.0) * zoomMultiplier;
       this.camera.position.set(center.x, center.y, center.z + distance);
       this.camera.lookAt(center.x, center.y, center.z);
       this.basePos = this.camera.position.clone();
