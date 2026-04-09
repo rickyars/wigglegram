@@ -777,7 +777,9 @@ sharp predict -i your_image.jpg -o output/</pre>
     setMode(mode) {
       this.mode = mode;
       if (mode === '3d') {
-        this.startOscillation(this._lastMode, this._lastParams);
+        if (this._lastMode && this._lastParams) {
+          this.startOscillation(this._lastMode, this._lastParams);
+        }
       } else {
         this.stopOscillation();
       }
