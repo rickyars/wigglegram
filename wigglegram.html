@@ -874,6 +874,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       setStatus('loading splat scene...', 'working');
       try {
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
+        viewer.update();
         const splatMesh = viewer.getSplatMesh();
         let center = new THREE.Vector3(0, 0, 0);
 
@@ -971,7 +972,8 @@ sharp predict -i your_image.jpg -o output/</pre>
         depthTest: false,
       });
 
-      this.startOscillation(PARAMS.mode, PARAMS);
+      await this._bakeDepth(THREE);
+      this.mode = 'depth';
       setStatus('splat loaded', 'done');
     }
 
