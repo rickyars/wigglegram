@@ -1047,6 +1047,23 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
+      if (this.mode === 'depth') {
+        const angle = (frameIndex / totalFrames) * 2 * Math.PI;
+        const xOffset = params.baseline * Math.sin(angle);
+        const width = scaledSrc.width;
+        const height = scaledSrc.height;
+        let colorData;
+        if (mode === 'orbit') {
+          colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
+        } else if (mode === 'parallax') {
+          colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+        } else if (mode === 'warp') {
+          colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
+        } else {
+          colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+        }
+        return { colorData, depthArray: scaledDepth, width, height };
+      }
       if (!this.viewer || !this.camera || !this.renderer) return null;
 
       const THREE = await import('three');
