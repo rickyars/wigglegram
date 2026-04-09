@@ -800,8 +800,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
         const splatMesh = viewer.getSplatMesh();
         let center = new THREE.Vector3(0, 0, 0);
-        let distance = PARAMS.splatDistance;
-        
+
         // Try GS3D's own bounding box method first (reads from CPU data, not GPU)
         let bbox = null;
         try {
@@ -819,19 +818,25 @@ sharp predict -i your_image.jpg -o output/</pre>
           bbox = new THREE.Box3().setFromObject(splatMesh);
         }
         
+        let autoFitDist = 3.0; // fallback if bbox unavailable
         if (bbox && !bbox.isEmpty()) {
           bbox.getCenter(center);
-          distance = PARAMS.splatDistance;
+          const sphere = new THREE.Sphere();
+          bbox.getBoundingSphere(sphere);
+          if (sphere.radius > 0) {
+            const fovRad = (Math.PI / 180) * 60;
+            autoFitDist = sphere.radius / Math.sin(fovRad / 2);
+          }
         } else {
-          console.warn(`SplatDepthSource: using fixed fallback distance=${PARAMS.splatDistance}`);
-          distance = PARAMS.splatDistance;
+          console.warn('SplatDepthSource: bbox unavailable, using fallback autoFitDist=3.0');
         }
-        
+        this._autoFitDist = autoFitDist;
+        const distance = autoFitDist * PARAMS.splatZoom;
         camera.position.set(center.x, center.y, center.z + distance);
         camera.lookAt(center.x, center.y, center.z);
         this.basePos = camera.position.clone();
         this._sceneCenter = center.clone();
-        console.log('[SplatDepthSource] camera auto-fit:', { center, distance });
+        console.log('[SplatDepthSource] camera auto-fit:', { center, autoFitDist, distance });
       } catch (err) {
         if (this._glCanvas && this._glCanvas.parentElement) {
           this._glCanvas.parentElement.removeChild(this._glCanvas);
