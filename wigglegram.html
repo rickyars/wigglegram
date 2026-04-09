@@ -727,10 +727,60 @@ sharp predict -i your_image.jpg -o output/</pre>
       this._glCanvas = null;
       this._lastMode = null;
       this._lastParams = null;
+      this.mode = 'depth';
+      this.bakedDepth = null;
+      this.bakedWidth = 0;
+      this.bakedHeight = 0;
     }
 
     stopOscillation() {
       if (this.oscId) { cancelAnimationFrame(this.oscId); this.oscId = null; }
+    }
+
+    async _bakeDepth(THREE) {
+      if (!this.renderer || !this.depthTarget || !this.depthReadTarget || !this.depthMaterial) return;
+      const w = this.renderer.domElement.width;
+      const h = this.renderer.domElement.height;
+
+      this.renderer.setRenderTarget(this.depthTarget);
+      this.viewer.update();
+      this.viewer.render();
+      this.renderer.setRenderTarget(null);
+
+      const quadGeo = new THREE.PlaneGeometry(2, 2);
+      const quadMesh = new THREE.Mesh(quadGeo, this.depthMaterial);
+      const depthScene = new THREE.Scene();
+      depthScene.add(quadMesh);
+      const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+
+      this.renderer.setRenderTarget(this.depthReadTarget);
+      this.renderer.render(depthScene, orthoCamera);
+      this.renderer.setRenderTarget(null);
+      quadGeo.dispose();
+
+      const raw = new Float32Array(w * h * 4);
+      this.renderer.readRenderTargetPixels(this.depthReadTarget, 0, 0, w, h, raw);
+
+      const depth = new Float32Array(w * h);
+      for (let y = 0; y < h; y++) {
+        const srcRow = (h - 1 - y) * w;
+        const dstRow = y * w;
+        for (let x = 0; x < w; x++) {
+          depth[dstRow + x] = 1.0 - raw[(srcRow + x) * 4];
+        }
+      }
+      this.bakedDepth = depth;
+      this.bakedWidth = w;
+      this.bakedHeight = h;
+    }
+
+    setMode(mode) {
+      this.mode = mode;
+      if (mode === '3d') {
+        this.startOscillation(this._lastMode, this._lastParams);
+      } else {
+        this.stopOscillation();
+      }
     }
 
     dispose() {
