@@ -384,6 +384,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     chromaticAberr: 0,
     outputWidth: 800,
     invertDepth: false,
+    splatDistance: 3,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
@@ -465,6 +466,15 @@ sharp predict -i your_image.jpg -o output/</pre>
     fovBinding = motion.addBinding(PARAMS, 'fov', {
       label: 'fov',
       min: 20, max: 80, step: 1,
+    });
+
+    motion.addBinding(PARAMS, 'splatDistance', {
+      label: 'splat distance',
+      min: 0.5, max: 50, step: 0.5,
+    }).on('change', (ev) => {
+      if (activeDepthSource instanceof SplatDepthSource) {
+        activeDepthSource.repositionCamera(ev.value);
+      }
     });
 
     // ── Optics folder ──
@@ -673,6 +683,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.depthMaterial = null;
       this._originalCanvas = null;
       this._glCanvas = null;
+      this._lastMode = null;
+      this._lastParams = null;
     }
 
     stopOscillation() {
@@ -770,7 +782,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
         const splatMesh = viewer.getSplatMesh();
         let center = new THREE.Vector3(0, 0, 0);
-        let distance = 5;
+        let distance = PARAMS.splatDistance;
         
         // Try GS3D's own bounding box method first (reads from CPU data, not GPU)
         let bbox = null;
@@ -791,14 +803,10 @@ sharp predict -i your_image.jpg -o output/</pre>
         
         if (bbox && !bbox.isEmpty()) {
           bbox.getCenter(center);
-          const size = new THREE.Vector3();
-          bbox.getSize(size);
-          const maxDim = Math.max(size.x, size.y, size.z);
-          const fovRad = (60 * Math.PI) / 180;
-          distance = (maxDim / 2) / Math.tan(fovRad / 2) * 2.0;
+          distance = PARAMS.splatDistance;
         } else {
-          console.warn('SplatDepthSource: using fixed fallback distance=3');
-          distance = 3;
+          console.warn(`SplatDepthSource: using fixed fallback distance=${PARAMS.splatDistance}`);
+          distance = PARAMS.splatDistance;
         }
         
         camera.position.set(center.x, center.y, center.z + distance);
@@ -872,6 +880,17 @@ sharp predict -i your_image.jpg -o output/</pre>
       // no-op: live render already running via rAF loop
     }
 
+    repositionCamera(distance) {
+      if (!this.camera) return;
+      const center = this._sceneCenter || { x: 0, y: 0, z: 0 };
+      this.camera.position.set(center.x, center.y, center.z + distance);
+      this.camera.lookAt(center.x, center.y, center.z);
+      this.basePos = this.camera.position.clone();
+      if (this._lastMode && this._lastParams) {
+        this.startOscillation(this._lastMode, this._lastParams);
+      }
+    }
+
     positionCamera(mode, angle, params) {
       const cx = this._sceneCenter ? this._sceneCenter.x : 0;
       const cy = this._sceneCenter ? this._sceneCenter.y : 0;
@@ -896,6 +915,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     startOscillation(mode, params) {
       this.stopOscillation();
       if (!this.viewer || !this.camera) return;
+      this._lastMode = mode;
+      this._lastParams = params;
       const startTime = performance.now();
       const tick = () => {
         const t = (performance.now() - startTime) / 1000;
