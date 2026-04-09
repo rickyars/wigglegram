@@ -358,7 +358,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       </label>
       <label class="upload-btn" id="depthSourceBtn">
         <span class="label-text">Upload Depth Source (optional)</span>
-        <a href="#" id="clearDepthSource" class="clear-link" style="display:none" onclick="clearDepthSource(event)">[clear]</a>
+        <a href="#" id="clearDepthSourceLink" class="clear-link" style="display:none" onclick="clearDepthSource(event)">[clear]</a>
         <input type="file" id="depthSourceInput" accept="image/*,.ply">
       </label>
     </div>
@@ -938,7 +938,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const startTime = performance.now();
       const tick = () => {
         const t = (performance.now() - startTime) / 1000;
-        const angle = Math.sin(t * 2 * Math.PI) * (params.baseline * Math.PI / 180);
+        const angle = Math.sin(t * Math.PI) * (params.baseline * Math.PI / 180);
         this.positionCamera(mode, angle, params);
         this.viewer.update();
         this.viewer.render();
@@ -1094,7 +1094,6 @@ sharp predict -i your_image.jpg -o output/</pre>
         updateDepthPaneLabel('depth (luminance)');
 
         document.getElementById('previews').classList.add('visible');
-        document.getElementById('generateBtn').disabled = true;
         document.getElementById('previewBtn').disabled = false;
 
         // Update source upload button
@@ -1118,7 +1117,7 @@ sharp predict -i your_image.jpg -o output/</pre>
 
   function updateDepthPaneLabel(text) {
     const label = document.getElementById('depthPaneLabel');
-    const clearLink = document.getElementById('clearDepthSource');
+    const clearLink = document.getElementById('clearDepthSourceLink');
     if (label) label.textContent = text;
     if (clearLink) clearLink.style.display = text === 'depth (luminance)' ? 'none' : 'inline';
   }
@@ -1627,6 +1626,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     let width, height, scaledSrc, depth, blurredSrc;
+    let origW = 800, origH = 480;
 
     if (!isSplat) {
       // Scale source image
@@ -1672,9 +1672,22 @@ sharp predict -i your_image.jpg -o output/</pre>
       const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
       blurredSrc = { data: blurredSrcData, width, height };
     } else {
-      // For splat: dimensions come from the renderer
-      width = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.width : 800;
-      height = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.height : 480;
+      // For splat: resize to target width for capture, then restore after encoding
+      origW = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.width : 800;
+      origH = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.height : 480;
+      if (targetWidth < origW) {
+        const scale = targetWidth / origW;
+        width = targetWidth;
+        height = Math.round(origH * scale);
+        activeDepthSource.renderer.setSize(width, height, false);
+        if (activeDepthSource.depthTarget) {
+          activeDepthSource.depthTarget.setSize(width, height);
+          activeDepthSource.depthReadTarget.setSize(width, height);
+        }
+      } else {
+        width = origW;
+        height = origH;
+      }
       scaledSrc = null;
       depth = null;
       blurredSrc = null;
@@ -1743,6 +1756,14 @@ sharp predict -i your_image.jpg -o output/</pre>
       URL.revokeObjectURL(workerUrl);
       showGifPreview(blob);
 
+      if (isSplat && activeDepthSource && activeDepthSource.renderer && (width !== origW || height !== origH)) {
+        activeDepthSource.renderer.setSize(origW, origH, false);
+        if (activeDepthSource.depthTarget) {
+          activeDepthSource.depthTarget.setSize(origW, origH);
+          activeDepthSource.depthReadTarget.setSize(origW, origH);
+        }
+      }
+
       // Resume splat oscillation after capture
       if (isSplat && activeDepthSource instanceof SplatDepthSource) {
         activeDepthSource.startOscillation(PARAMS.mode, PARAMS);
@@ -1755,6 +1776,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       // generateBtn is enabled by showGifPreview()
     });
 
+    // Restore renderer size after capture (done inside finished callback)
     gif.render();
   }
 
