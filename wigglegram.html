@@ -978,7 +978,22 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     renderToPane(canvas) {
-      // no-op: live render already running via rAF loop
+      if (this.mode === '3d') return; // live render already running via rAF loop
+      if (!this.bakedDepth) return;
+      const w = this.bakedWidth;
+      const h = this.bakedHeight;
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      const img = ctx.createImageData(w, h);
+      for (let i = 0; i < this.bakedDepth.length; i++) {
+        const v = Math.round(this.bakedDepth[i] * 255);
+        img.data[i * 4]     = v;
+        img.data[i * 4 + 1] = v;
+        img.data[i * 4 + 2] = v;
+        img.data[i * 4 + 3] = 255;
+      }
+      ctx.putImageData(img, 0, 0);
     }
 
     repositionCamera(zoomMultiplier) {
