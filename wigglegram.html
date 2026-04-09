@@ -150,23 +150,6 @@
     background: #000;
   }
 
-  .download-btn {
-    background: transparent;
-    border: 1px solid var(--green);
-    color: var(--green);
-    padding: 0.2rem 0.7rem;
-    font-family: inherit;
-    font-size: 0.65rem;
-    letter-spacing: 0.08em;
-    text-transform: uppercase;
-    cursor: pointer;
-    transition: all 0.15s;
-  }
-  .download-btn:hover {
-    background: var(--green);
-    color: #000;
-  }
-
   /* ─── UPLOAD BUTTONS ──────────────────────────────────────── */
   .upload-section {
     display: flex;
@@ -217,8 +200,7 @@
   }
 
   /* ─── GENERATE BUTTON ─────────────────────────────────────── */
-  button#generateBtn,
-  button#previewBtn {
+  button#generateBtn {
     background: transparent;
     border: 1px solid var(--green);
     color: var(--green);
@@ -231,13 +213,11 @@
     transition: all 0.15s;
     width: 100%;
   }
-  button#generateBtn:hover:not(:disabled),
-  button#previewBtn:hover:not(:disabled) {
+  button#generateBtn:hover:not(:disabled) {
     background: var(--green);
     color: #000;
   }
-  button#generateBtn:disabled,
-  button#previewBtn:disabled {
+  button#generateBtn:disabled {
     border-color: var(--border-active);
     color: var(--text-dim);
     cursor: not-allowed;
@@ -323,7 +303,6 @@
     <div class="gif-preview-panel" id="gifPreviewPanel">
       <div class="preview-label">
         <span>output</span>
-        <button class="download-btn" id="downloadBtn" onclick="downloadGif()">download</button>
       </div>
       <img id="gifPreview" alt="generated wigglegram">
     </div>
@@ -366,7 +345,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     <div id="tweakpane-container"></div>
 
     <div style="display:flex; flex-direction:column; gap:0.5rem;">
-      <button id="previewBtn" disabled onclick="generatePreview()">generate preview</button>
       <button id="generateBtn" disabled onclick="generate()">generate gif</button>
     </div>
   </div>
@@ -1094,7 +1072,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         updateDepthPaneLabel('depth (luminance)');
 
         document.getElementById('previews').classList.add('visible');
-        document.getElementById('previewBtn').disabled = false;
+        document.getElementById('generateBtn').disabled = false;
 
         // Update source upload button
         const btn = document.getElementById('sourceUploadBtn');
@@ -1589,6 +1567,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     img.src = gifBlobUrl;
     panel.classList.add('visible');
     document.getElementById('generateBtn').disabled = false;
+    downloadGif();
   }
 
   // Clean up on page unload
@@ -1603,9 +1582,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     setStatus('starting...', 'working');
     setProgress(0);
 
-    const previewBtn = document.getElementById('previewBtn');
     const generateBtn = document.getElementById('generateBtn');
-    previewBtn.disabled = true;
     generateBtn.disabled = true;
 
     const numFrames = PARAMS.frames;
@@ -1623,7 +1600,6 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     if (isSplat && !activeDepthSource.viewer) {
       setStatus('splat not fully loaded yet — please wait', 'error');
-      previewBtn.disabled = false;
       generateBtn.disabled = false;
       return;
     }
@@ -1706,7 +1682,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       workerUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
     } catch(e) {
       setStatus('could not load gif encoder: ' + e.message, 'error');
-      previewBtn.disabled = false;
+      generateBtn.disabled = false;
       return;
     }
 
@@ -1759,7 +1735,6 @@ sharp predict -i your_image.jpg -o output/</pre>
       console.error('GIF encoding error:', err);
       setStatus('GIF encoding failed — check console', 'error');
       setProgress(-1);
-      previewBtn.disabled = false;
       generateBtn.disabled = false;
     });
 
@@ -1783,7 +1758,6 @@ sharp predict -i your_image.jpg -o output/</pre>
       const kb = Math.round(blob.size / 1024);
       setStatus(`done  \u00b7  ${width}\u00d7${height}  \u00b7  ${numFrames}f  \u00b7  ${kb}kb`, 'done');
       setProgress(-1);
-      previewBtn.disabled = false;
       // generateBtn is enabled by showGifPreview()
     });
 
@@ -1793,10 +1767,6 @@ sharp predict -i your_image.jpg -o output/</pre>
 
   window.generate = async function() {
     await runPipeline(PARAMS.outputWidth);
-  };
-
-  window.generatePreview = async function() {
-    await runPipeline(400);
   };
 </script>
 </body>
