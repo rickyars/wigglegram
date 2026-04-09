@@ -1021,7 +1021,8 @@ sharp predict -i your_image.jpg -o output/</pre>
         this.camera.lookAt(cx, cy, cz);
       } else if (mode === 'parallax') {
         this.camera.position.copy(this.basePos);
-        this.camera.position.x = this.basePos.x + Math.sin(angle) * params.baseline * 0.05;
+        const shift = (this._autoFitDist || 3.0) * (params.baseline / 100);
+        this.camera.position.x = this.basePos.x + Math.sin(angle) * shift;
         this.camera.lookAt(cx, cy, cz);
       } else if (mode === 'warp') {
         this.camera.position.copy(this.basePos);
