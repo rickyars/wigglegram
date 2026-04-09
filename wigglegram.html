@@ -223,6 +223,24 @@
     cursor: not-allowed;
   }
 
+  button#downloadBtn {
+    background: transparent;
+    border: 1px solid var(--green);
+    color: var(--green);
+    padding: 0.6rem 1.8rem;
+    font-family: inherit;
+    font-size: 0.85rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    cursor: pointer;
+    transition: all 0.15s;
+    width: auto;
+  }
+  button#downloadBtn:hover {
+    background: var(--green);
+    color: #000;
+  }
+
   /* ─── STATUS / PROGRESS ───────────────────────────────────── */
   .status {
     font-size: 0.75rem;
