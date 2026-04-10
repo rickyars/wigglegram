@@ -1134,6 +1134,12 @@ sharp predict -i your_image.jpg -o output/</pre>
       const angle = Math.sin(rawAngle) * (params.baseline * Math.PI / 180);
       this.positionCamera(mode, angle, params);
 
+      // Settle splat sort worker before capture (3 rAF ticks)
+      for (let i = 0; i < 3; i++) {
+        this.viewer.update();
+        await new Promise(r => requestAnimationFrame(r));
+      }
+
       // Render color to default framebuffer
       this.renderer.setRenderTarget(null);
       this.viewer.update();
