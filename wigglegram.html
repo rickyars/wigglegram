@@ -929,9 +929,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       try {
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
         const splatMesh = viewer.getSplatMesh();
-        // Poll until GS3D worker has populated splatBuffer (getSplatCount > 0)
+        // Poll until GS3D worker has populated splatBuffer and splatBuffers[0] (both required for getSplatCenter)
         let pollMs = 0;
-        while (splatMesh.getSplatCount() === 0 && pollMs < 5000) {
+        while ((splatMesh.getSplatCount() === 0 || !splatMesh.splatBuffers?.[0]) && pollMs < 5000) {
           await new Promise(r => setTimeout(r, 100));
           viewer.update();
           pollMs += 100;
