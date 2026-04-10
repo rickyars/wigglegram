@@ -1073,22 +1073,14 @@ sharp predict -i your_image.jpg -o output/</pre>
       const cx = this._sceneCenter ? this._sceneCenter.x : 0;
       const cy = this._sceneCenter ? this._sceneCenter.y : 0;
       const cz = this._sceneCenter ? this._sceneCenter.z : 0;
-      if (mode === 'orbit') {
-        const sc = this._sceneCenter;
-        const dist = sc ? this.basePos.distanceTo(sc) : (this.basePos.length() || 5);
-        this.camera.position.x = cx + Math.sin(angle) * dist;
-        this.camera.position.y = this.basePos.y;
-        this.camera.position.z = cz + Math.cos(angle) * dist;
-        this.camera.lookAt(cx, cy, cz);
-      } else if (mode === 'parallax') {
-        this.camera.position.copy(this.basePos);
-        const shift = (this._autoFitDist || 3.0) * (params.baseline / 100);
-        this.camera.position.x = this.basePos.x + Math.sin(angle) * shift;
-        this.camera.lookAt(cx, cy, cz);
-      } else if (mode === 'warp') {
-        this.camera.position.copy(this.basePos);
-        this.camera.rotation.set(0, angle, 0);
-      }
+      // All 3D modes orbit the subject — the orbit/parallax/warp distinction
+      // is only meaningful for 2D depth-map pixel shifting.
+      const sc = this._sceneCenter;
+      const dist = sc ? this.basePos.distanceTo(sc) : (this._autoFitDist || 3.0);
+      this.camera.position.x = cx + Math.sin(angle) * dist;
+      this.camera.position.y = this.basePos.y;
+      this.camera.position.z = cz + Math.cos(angle) * dist;
+      this.camera.lookAt(cx, cy, cz);
     }
 
     startOscillation(mode, params) {
