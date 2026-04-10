@@ -641,8 +641,9 @@ sharp predict -i your_image.jpg -o output/</pre>
     sCtx.putImageData(imgData, 0, 0);
     const dst = document.createElement('canvas');
     dst.width = dstW; dst.height = dstH;
-    dst.getContext('2d').drawImage(src, 0, 0, dstW, dstH);
-    const scaled = dst.getContext('2d').getImageData(0, 0, dstW, dstH);
+    const dstCtx = dst.getContext('2d', { willReadFrequently: true });
+    dstCtx.drawImage(src, 0, 0, dstW, dstH);
+    const scaled = dstCtx.getImageData(0, 0, dstW, dstH);
     const out = new Float32Array(dstW * dstH);
     for (let i = 0; i < out.length; i++) {
       out[i] = scaled.data[i * 4] / 255;
@@ -927,8 +928,15 @@ sharp predict -i your_image.jpg -o output/</pre>
       setStatus('loading splat scene...', 'working');
       try {
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
-        viewer.update();
         const splatMesh = viewer.getSplatMesh();
+        // Poll until GS3D worker has populated splatBuffer (getSplatCount > 0)
+        let pollMs = 0;
+        while (splatMesh.getSplatCount() === 0 && pollMs < 5000) {
+          await new Promise(r => setTimeout(r, 100));
+          viewer.update();
+          pollMs += 100;
+        }
+        if (pollMs > 0) console.log(`[SplatDepthSource] waited ${pollMs}ms for splat data`);
         let center = new THREE.Vector3(0, 0, 0);
 
         // Try GS3D's own bounding box method first (reads from CPU data, not GPU)
@@ -1598,7 +1606,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           const idx = y * width + x;
           const d = depth[idx];
           if (d < minD || d >= maxD) continue;
-          const dstX = Math.round(x + d * xOffset);
+          const dstX = Math.round(x + (d - 0.5) * xOffset);
           if (dstX < 0 || dstX >= width) continue;
           const si = idx * 4;
           const di = (y * width + dstX) * 4;
@@ -1648,7 +1656,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
         const d = depth[y * width + x];
-        const srcX = Math.max(0, Math.min(width - 1, Math.round(x - d * xOffset)));
+        const srcX = Math.max(0, Math.min(width - 1, Math.round(x - (d - 0.5) * xOffset)));
         const si = (y * width + srcX) * 4;
         const di = (y * width + x) * 4;
         out[di]     = srcData[si];
