@@ -933,31 +933,34 @@ sharp predict -i your_image.jpg -o output/</pre>
       try {
         await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
         const splatMesh = viewer.getSplatMesh();
-        // Poll until GS3D worker has populated splatBuffer and splatBuffers[0] (both required for getSplatCenter)
+        // Poll until GS3D worker delivers splat data via update() loop
         let pollMs = 0;
-        while ((splatMesh.getSplatCount() === 0 || !splatMesh.splatBuffers?.[0]) && pollMs < 5000) {
+        while (splatMesh.getSplatCount() === 0 && pollMs < 5000) {
           await new Promise(r => setTimeout(r, 100));
           viewer.update();
           pollMs += 100;
         }
-        if (pollMs > 0) console.log(`[SplatDepthSource] waited ${pollMs}ms for splat data`);
+        if (pollMs > 0) console.log('[SplatDepthSource] waited ' + pollMs + 'ms for splat data');
         let center = new THREE.Vector3(0, 0, 0);
 
-        // Try GS3D's own bounding box method first (reads from CPU data, not GPU)
+        // Sample splat positions to compute bounding box.
+        // getSplatCenter(i, outVec, applyTransform) writes position of splat i into outVec.
         let bbox = null;
-        try {
-          if (typeof splatMesh.getBoundingBox === 'function') {
-            bbox = splatMesh.getBoundingBox();
-          } else if (typeof splatMesh.getSplatCenter === 'function') {
-            center = splatMesh.getSplatCenter();
+        const splatCount = splatMesh.getSplatCount();
+        if (splatCount > 0) {
+          try {
+            const tempPt = new THREE.Vector3();
+            bbox = new THREE.Box3();
+            const step = Math.max(1, Math.floor(splatCount / 500));
+            for (let i = 0; i < splatCount; i += step) {
+              splatMesh.getSplatCenter(i, tempPt, false);
+              bbox.expandByPoint(tempPt);
+            }
+            if (bbox.isEmpty()) bbox = null;
+          } catch(e) {
+            console.warn('Could not sample splat positions for bbox:', e);
+            bbox = null;
           }
-        } catch(e) {
-          console.warn('Could not get splat bounds from GS3D API:', e);
-        }
-        
-        // Fall back to Three.js Box3 from object (works if geometry has position attrs)
-        if (!bbox || bbox.isEmpty()) {
-          bbox = new THREE.Box3().setFromObject(splatMesh);
         }
         
         let autoFitDist = 3.0; // fallback if bbox unavailable
