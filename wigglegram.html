@@ -792,38 +792,69 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     async _bakeDepth(THREE) {
-      if (!this.renderer || !this.depthTarget || !this.depthReadTarget || !this.depthMaterial) return;
+      if (!this.viewer || !this.camera || !this.renderer) return;
       const w = this.renderer.domElement.width;
       const h = this.renderer.domElement.height;
+      const splatMesh = this.viewer.getSplatMesh();
+      const splatCount = splatMesh.getSplatCount();
+      if (!splatCount) return;
 
-      this.renderer.setRenderTarget(this.depthTarget);
-      this.viewer.update();
-      this.viewer.render();
-      this.renderer.setRenderTarget(null);
+      // Project splat world-space centers to screen, build z-buffer by distance from camera.
+      // GS3D renders splats with depthWrite:false so the WebGL depth texture stays at far-plane.
+      // Position projection is the only reliable way to extract depth from splat data.
+      const zBuf = new Float32Array(w * h).fill(Infinity);
+      this.camera.updateMatrixWorld();
+      const viewMatrix = new THREE.Matrix4().copy(this.camera.matrixWorld).invert();
+      const projMat = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, viewMatrix);
+      const p = new THREE.Vector3();
+      const camPos = this.camera.position;
+      const step = Math.max(1, Math.floor(splatCount / 30000));
 
-      const quadGeo = new THREE.PlaneGeometry(2, 2);
-      const quadMesh = new THREE.Mesh(quadGeo, this.depthMaterial);
-      const depthScene = new THREE.Scene();
-      depthScene.add(quadMesh);
-      const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
+      for (let i = 0; i < splatCount; i += step) {
+        splatMesh.getSplatCenter(i, p, true);
+        const wx = p.x, wy = p.y, wz = p.z;
+        p.applyMatrix4(projMat);
+        if (p.z < -1 || p.z > 1) continue;
+        const sx = Math.round((p.x * 0.5 + 0.5) * (w - 1));
+        const sy = Math.round((1 - (p.y * 0.5 + 0.5)) * (h - 1));
+        if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
+        const dist = Math.sqrt((wx - camPos.x) ** 2 + (wy - camPos.y) ** 2 + (wz - camPos.z) ** 2);
+        const idx = sy * w + sx;
+        if (dist < zBuf[idx]) zBuf[idx] = dist;
+      }
 
-      this.renderer.setRenderTarget(this.depthReadTarget);
-      this.renderer.render(depthScene, orthoCamera);
-      this.renderer.setRenderTarget(null);
-      quadGeo.dispose();
-
-      const raw = new Float32Array(w * h * 4);
-      this.renderer.readRenderTargetPixels(this.depthReadTarget, 0, 0, w, h, raw);
-
-      const depth = new Float32Array(w * h);
-      for (let y = 0; y < h; y++) {
-        const srcRow = (h - 1 - y) * w;
-        const dstRow = y * w;
-        for (let x = 0; x < w; x++) {
-          depth[dstRow + x] = 1.0 - raw[(srcRow + x) * 4];
+      // Normalize distances to [0,1] where 1=near, 0=far
+      let minD = Infinity, maxD = 0;
+      for (let i = 0; i < zBuf.length; i++) {
+        if (zBuf[i] !== Infinity) {
+          if (zBuf[i] < minD) minD = zBuf[i];
+          if (zBuf[i] > maxD) maxD = zBuf[i];
         }
       }
-      this.bakedDepth = depth;
+      const range = (maxD - minD) || 1;
+      const depth = new Float32Array(w * h);
+      for (let i = 0; i < depth.length; i++) {
+        depth[i] = zBuf[i] === Infinity ? 0 : 1 - (zBuf[i] - minD) / range;
+      }
+
+      // Multi-pass dilation to fill holes left by sparse point projection (5 passes)
+      let cur = depth;
+      for (let pass = 0; pass < 5; pass++) {
+        const next = new Float32Array(cur);
+        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+          const idx = y * w + x;
+          if (cur[idx] > 0) continue;
+          let sum = 0, cnt = 0;
+          if (cur[idx - 1] > 0) { sum += cur[idx - 1]; cnt++; }
+          if (cur[idx + 1] > 0) { sum += cur[idx + 1]; cnt++; }
+          if (cur[idx - w] > 0) { sum += cur[idx - w]; cnt++; }
+          if (cur[idx + w] > 0) { sum += cur[idx + w]; cnt++; }
+          if (cnt) next[idx] = sum / cnt;
+        }
+        cur = next;
+      }
+
+      this.bakedDepth = cur;
       this.bakedWidth = w;
       this.bakedHeight = h;
     }
@@ -943,18 +974,28 @@ sharp predict -i your_image.jpg -o output/</pre>
         if (pollMs > 0) console.log('[SplatDepthSource] waited ' + pollMs + 'ms for splat data');
         let center = new THREE.Vector3(0, 0, 0);
 
-        // Sample splat positions to compute bounding box.
-        // getSplatCenter(i, outVec, applyTransform) writes position of splat i into outVec.
+        // Sample splat world-space positions and build a robust bbox (outliers filtered at 3x RMS).
         let bbox = null;
         const splatCount = splatMesh.getSplatCount();
         if (splatCount > 0) {
           try {
-            const tempPt = new THREE.Vector3();
-            bbox = new THREE.Box3();
             const step = Math.max(1, Math.floor(splatCount / 500));
+            const pts = [];
+            const centroid = new THREE.Vector3();
             for (let i = 0; i < splatCount; i += step) {
-              splatMesh.getSplatCenter(i, tempPt, false);
-              bbox.expandByPoint(tempPt);
+              const p = new THREE.Vector3();
+              splatMesh.getSplatCenter(i, p, true);
+              pts.push(p);
+              centroid.add(p);
+            }
+            centroid.divideScalar(pts.length);
+            let sumSq = 0;
+            for (const p of pts) sumSq += p.distanceToSquared(centroid);
+            const rms = Math.sqrt(sumSq / pts.length);
+            const maxDist = Math.max(rms * 3, 0.01);
+            bbox = new THREE.Box3();
+            for (const p of pts) {
+              if (p.distanceTo(centroid) <= maxDist) bbox.expandByPoint(p);
             }
             if (bbox.isEmpty()) bbox = null;
           } catch(e) {
