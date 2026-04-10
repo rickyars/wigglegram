@@ -913,7 +913,8 @@ sharp predict -i your_image.jpg -o output/</pre>
 
       const container = paneCanvas.parentElement;
       const w = (container ? container.clientWidth : paneCanvas.clientWidth) || 800;
-      const h = Math.max(Math.round(w * 0.6), 300);
+      const srcAspect = (typeof srcImageData !== 'undefined' && srcImageData) ? srcImageData.height / srcImageData.width : 0.6;
+      const h = Math.max(Math.round(w * srcAspect), 300);
       if (this._originalCanvas && this._originalCanvas !== paneCanvas) {
         this._originalCanvas.style.display = '';
       }
@@ -962,7 +963,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const blobUrl = URL.createObjectURL(file);
       setStatus('loading splat scene...', 'working');
       try {
-        await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
+        await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [0, 0, 1, 0] });
         const splatMesh = viewer.getSplatMesh();
         // Poll until GS3D worker delivers splat data via update() loop
         let pollMs = 0;
@@ -1141,7 +1142,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const startTime = performance.now();
       const tick = () => {
         const t = (performance.now() - startTime) / 1000;
-        const angle = Math.sin(t * Math.PI) * (params.baseline * Math.PI / 180);
+        const angle = Math.sin(t * Math.PI / 2) * (params.baseline * Math.PI / 180);
         this.positionCamera(mode, angle, params);
         this.viewer.update();
         this.viewer.render();
