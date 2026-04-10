@@ -831,11 +831,15 @@ sharp predict -i your_image.jpg -o output/</pre>
     setMode(mode) {
       this.mode = mode;
       if (mode === '3d') {
+        if (this._originalCanvas) this._originalCanvas.style.display = 'none';
+        if (this._glCanvas) this._glCanvas.style.display = '';
         if (this._lastMode && this._lastParams) {
           this.startOscillation(this._lastMode, this._lastParams);
         }
       } else {
         this.stopOscillation();
+        if (this._glCanvas) this._glCanvas.style.display = 'none';
+        if (this._originalCanvas) this._originalCanvas.style.display = '';
       }
     }
 
@@ -1035,6 +1039,8 @@ sharp predict -i your_image.jpg -o output/</pre>
 
       await this._bakeDepth(THREE);
       this.mode = 'depth';
+      if (this._glCanvas) this._glCanvas.style.display = 'none';
+      if (this._originalCanvas) this._originalCanvas.style.display = '';
       setStatus('splat loaded', 'done');
     }
 
