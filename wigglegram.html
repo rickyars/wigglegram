@@ -427,7 +427,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     chromaticAberr: 0,
     outputWidth: 800,
     invertDepth: false,
-    splatZoom: 0.5,
+    splatZoom: 1.0,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
@@ -800,15 +800,20 @@ sharp predict -i your_image.jpg -o output/</pre>
       const splatCount = splatMesh.getSplatCount();
       if (!splatCount) return;
 
-      // Project splat world-space centers to screen, build z-buffer by distance from camera.
-      // GS3D renders splats with depthWrite:false so the WebGL depth texture stays at far-plane.
-      // Position projection is the only reliable way to extract depth from splat data.
+      // Bake depth from the source-camera viewpoint (origin). The splat was reconstructed
+      // from the source photo whose camera was at the COLMAP origin. After the 180-degree
+      // X-axis rotation applied at load, that origin maps to Three.js (0,0,0). Baking from
+      // there ensures the depth map aligns pixel-for-pixel with the source image.
+      const bakeCam = new THREE.PerspectiveCamera(60, w / h, 0.1, 500);
+      const sc = this._sceneCenter;
+      bakeCam.position.set(0, 0, 0);
+      bakeCam.lookAt(sc ? sc.x : 0, sc ? sc.y : 0, sc ? sc.z : -1);
+      bakeCam.updateMatrixWorld();
       const zBuf = new Float32Array(w * h).fill(Infinity);
-      this.camera.updateMatrixWorld();
-      const viewMatrix = new THREE.Matrix4().copy(this.camera.matrixWorld).invert();
-      const projMat = new THREE.Matrix4().multiplyMatrices(this.camera.projectionMatrix, viewMatrix);
+      const viewMatrix = new THREE.Matrix4().copy(bakeCam.matrixWorld).invert();
+      const projMat = new THREE.Matrix4().multiplyMatrices(bakeCam.projectionMatrix, viewMatrix);
       const p = new THREE.Vector3();
-      const camPos = this.camera.position;
+      const camPos = bakeCam.position;
       const step = Math.max(1, Math.floor(splatCount / 30000));
 
       for (let i = 0; i < splatCount; i += step) {
@@ -1154,7 +1159,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       const startTime = performance.now();
       const tick = () => {
         const t = (performance.now() - startTime) / 1000;
-        const angle = Math.sin(t * Math.PI / 2) * (params.baseline * Math.PI / 180);
+        // Match the same angular scale used in captureFrame: baseline pixels = same apparent shift as 2D depth mode.
+        const rendW = (this.renderer ? this.renderer.domElement.width : 800) || 800;
+        const oscFovRad = (Math.PI / 180) * 60;
+        const angle = Math.sin(t * Math.PI / 2) * params.baseline * Math.tan(oscFovRad / 2) / (rendW / 2);
         this.positionCamera(mode, angle, params);
         this.viewer.update();
         this.viewer.render();
@@ -1188,7 +1196,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       const h = this.renderer.domElement.height;
 
       const rawAngle = (frameIndex / totalFrames) * 2 * Math.PI;
-      const angle = Math.sin(rawAngle) * (params.baseline * Math.PI / 180);
+      // Scale angle so baseline pixels produce the same apparent screen shift as in 2D depth mode.
+      // angle = baseline * tan(fov/2) / (canvas_width/2), derived from: screen_shift = angle * (w/2) / tan(fov/2) = baseline
+      const fovRad = (Math.PI / 180) * 60;
+      const angle = Math.sin(rawAngle) * params.baseline * Math.tan(fovRad / 2) / (w / 2);
       this.positionCamera(mode, angle, params);
 
       // Settle splat sort worker before capture (6 rAF ticks)
