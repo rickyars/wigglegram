@@ -427,7 +427,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     chromaticAberr: 0,
     outputWidth: 800,
     invertDepth: false,
-    splatZoom: 1.0,
+    splatZoom: 0.5,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
@@ -839,7 +839,7 @@ sharp predict -i your_image.jpg -o output/</pre>
 
       // Multi-pass dilation to fill holes left by sparse point projection (5 passes)
       let cur = depth;
-      for (let pass = 0; pass < 5; pass++) {
+      for (let pass = 0; pass < 20; pass++) {
         const next = new Float32Array(cur);
         for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
           const idx = y * w + x;
@@ -963,7 +963,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const blobUrl = URL.createObjectURL(file);
       setStatus('loading splat scene...', 'working');
       try {
-        await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [0, 0, 1, 0] });
+        await viewer.addSplatScene(blobUrl, { format, splatAlphaRemovalThreshold: 5, rotation: [1, 0, 0, 0] });
         const splatMesh = viewer.getSplatMesh();
         // Poll until GS3D worker delivers splat data via update() loop
         let pollMs = 0;
