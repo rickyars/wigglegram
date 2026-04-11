@@ -427,7 +427,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     chromaticAberr: 0,
     outputWidth: 800,
     invertDepth: false,
-    splatZoom: 1.0,
+    splatZoom: 0.5,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
@@ -845,7 +845,9 @@ sharp predict -i your_image.jpg -o output/</pre>
 
       // Multi-pass dilation to fill holes left by sparse point projection (5 passes)
       let cur = depth;
-      for (let pass = 0; pass < 20; pass++) {
+      // 8 dilation passes fill small gaps between splats without spreading foreground
+      // depth values too far into empty background regions.
+      for (let pass = 0; pass < 8; pass++) {
         const next = new Float32Array(cur);
         for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
           const idx = y * w + x;
@@ -858,6 +860,17 @@ sharp predict -i your_image.jpg -o output/</pre>
           if (cnt) next[idx] = sum / cnt;
         }
         cur = next;
+      }
+
+      // Smooth depth edges — averaging with zero neighbors creates a gradient at
+      // object boundaries, reducing the sharp depth discontinuities that cause pixel ripping.
+      for (let pass = 0; pass < 3; pass++) {
+        const smth = new Float32Array(cur);
+        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
+          const idx = y * w + x;
+          smth[idx] = (cur[idx] + cur[idx - 1] + cur[idx + 1] + cur[idx - w] + cur[idx + w]) / 5;
+        }
+        cur = smth;
       }
 
       this.bakedDepth = cur;
