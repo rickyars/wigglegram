@@ -618,6 +618,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     document.getElementById('splatDepthBtn').classList.toggle('active', mode === 'depth');
     document.getElementById('splat3DBtn').classList.toggle('active', mode === '3d');
     if (mode === '3d') {
+      activeDepthSource.startOscillation(PARAMS.mode, PARAMS);
       showSplatZoom();
       updateDepthPaneLabel('splat (3D)');
     } else {
@@ -995,10 +996,20 @@ sharp predict -i your_image.jpg -o output/</pre>
             const rms = Math.sqrt(sumSq / pts.length);
             const maxDist = Math.max(rms * 3, 0.01);
             bbox = new THREE.Box3();
+            let inlierSumY = 0, inlierCount = 0;
             for (const p of pts) {
-              if (p.distanceTo(centroid) <= maxDist) bbox.expandByPoint(p);
+              if (p.distanceTo(centroid) <= maxDist) {
+                bbox.expandByPoint(p);
+                inlierSumY += p.y;
+                inlierCount++;
+              }
             }
-            if (bbox.isEmpty()) bbox = null;
+            if (bbox.isEmpty()) { bbox = null; } else if (inlierCount > 0) {
+              // Use mean Y of inlier points - more robust than bbox midpoint Y
+              // (bbox midpoint is skewed by sparse sky/background splats at extreme Y)
+              bbox._inlierMeanY = inlierSumY / inlierCount;
+            }
+            if (bbox && !bbox.isEmpty() && bbox.isEmpty()) bbox = null;
           } catch(e) {
             console.warn('Could not sample splat positions for bbox:', e);
             bbox = null;
@@ -1008,6 +1019,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         let autoFitDist = 3.0; // fallback if bbox unavailable
         if (bbox && !bbox.isEmpty()) {
           bbox.getCenter(center);
+          if (typeof bbox._inlierMeanY === 'number') center.y = bbox._inlierMeanY;
           const sphere = new THREE.Sphere();
           bbox.getBoundingSphere(sphere);
           if (sphere.radius > 0) {
@@ -1179,8 +1191,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       const angle = Math.sin(rawAngle) * (params.baseline * Math.PI / 180);
       this.positionCamera(mode, angle, params);
 
-      // Settle splat sort worker before capture (3 rAF ticks)
-      for (let i = 0; i < 3; i++) {
+      // Settle splat sort worker before capture (6 rAF ticks)
+      for (let i = 0; i < 6; i++) {
         this.viewer.update();
         await new Promise(r => requestAnimationFrame(r));
       }
