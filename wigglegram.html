@@ -934,8 +934,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (!this.camera) return;
       const center = this._sceneCenter || { x: 0, y: 0, z: 0 };
       const distance = (this._autoFitDist || 3.0) * zoomMultiplier;
-      this.camera.position.set(center.x, center.y, center.z + distance);
-      this.camera.lookAt(center.x, center.y, center.z);
+      this.camera.position.set(center.x + PARAMS.splatOffsetX, center.y + PARAMS.splatOffsetY, center.z + distance);
+      this.camera.lookAt(center.x + PARAMS.splatOffsetX, center.y + PARAMS.splatOffsetY, center.z);
       this.basePos = this.camera.position.clone();
       if (this._lastMode && this._lastParams) {
         this.startOscillation(this._lastMode, this._lastParams);
@@ -953,7 +953,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.camera.position.x = cx + Math.sin(angle) * dist;
       this.camera.position.y = this.basePos.y;
       this.camera.position.z = cz + Math.cos(angle) * dist;
-      this.camera.lookAt(cx, cy, cz);
+      this.camera.lookAt(cx + PARAMS.splatOffsetX, cy + PARAMS.splatOffsetY, cz);
     }
 
     startOscillation(mode, params) {
