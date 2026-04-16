@@ -336,8 +336,8 @@
         <div class="preview-label">
           <span id="depthPaneLabel">depth (luminance)</span>
           <div class="splat-mode-toggle" id="splatModeToggle">
-            <button class="splat-mode-btn active" id="splatDepthBtn" onclick="setSplatMode('depth')">[depth]</button>
-            <button class="splat-mode-btn" id="splat3DBtn" onclick="setSplatMode('3d')">[3D]</button>
+            <button class="splat-mode-btn active" id="splatDepthBtn">[depth]</button>
+            <button class="splat-mode-btn" id="splat3DBtn">[3D]</button>
           </div>
         </div>
         <canvas id="depthCanvas"></canvas>
@@ -614,22 +614,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     splatZoomBinding = null;
   }
 
-  window.setSplatMode = function(mode) {
-    if (!(activeDepthSource instanceof SplatDepthSource)) return;
-    activeDepthSource.setMode(mode);
-    const depthCanvas = document.getElementById('depthCanvas');
-    activeDepthSource.renderToPane(depthCanvas);
-    document.getElementById('splatDepthBtn').classList.toggle('active', mode === 'depth');
-    document.getElementById('splat3DBtn').classList.toggle('active', mode === '3d');
-    if (mode === '3d') {
-      activeDepthSource.startOscillation(PARAMS.mode, PARAMS);
-      showSplatZoom();
-      updateDepthPaneLabel('splat (3D)');
-    } else {
-      hideSplatZoom();
-      updateDepthPaneLabel('splat (depth)');
-    }
-  };
 
   class LuminanceDepthSource {
     constructor(srcImageData) {
@@ -942,6 +926,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.basePos = camera.position.clone();
 
       setStatus('splat loaded', 'done');
+      if (this._glCanvas) this._glCanvas.style.display = '';
+      this.startOscillation(PARAMS.mode, PARAMS);
     }
 
     repositionCamera(zoomMultiplier) {
@@ -1062,12 +1048,12 @@ sharp predict -i your_image.jpg -o output/</pre>
       activeDepthSource = splatSrc;
       setStatus('loading splat...', 'working');
       splatSrc.load(file, depthPaneCanvas).then(() => {
-        updateDepthPaneLabel('splat (depth)');
-        hideSplatZoom();
+        updateDepthPaneLabel('splat (3D)');
         document.getElementById('splatModeToggle').classList.add('visible');
-        document.getElementById('splatDepthBtn').classList.add('active');
-        document.getElementById('splat3DBtn').classList.remove('active');
-        activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+        document.getElementById('splatDepthBtn').classList.remove('active');
+        document.getElementById('splatDepthBtn').classList.add('disabled');
+        document.getElementById('splat3DBtn').classList.add('active');
+        document.getElementById('splat3DBtn').classList.remove('disabled');
       }).catch(err => {
         console.error('splat load error:', err);
         setStatus('splat load failed — check console', 'error');
@@ -1088,8 +1074,11 @@ sharp predict -i your_image.jpg -o output/</pre>
       const imageData = ctx.getImageData(0, 0, sw, sh);
       activeDepthSource = new ImageDepthSource(imageData);
       activeDepthSource.renderToPane(depthPaneCanvas);
-      hideSplatZoom();
-      document.getElementById('splatModeToggle').classList.remove('visible');
+      document.getElementById('splatModeToggle').classList.add('visible');
+      document.getElementById('splatDepthBtn').classList.add('active');
+      document.getElementById('splatDepthBtn').classList.remove('disabled');
+      document.getElementById('splat3DBtn').classList.remove('active');
+      document.getElementById('splat3DBtn').classList.add('disabled');
       updateDepthPaneLabel('depth (custom: ' + file.name + ')');
       depthSourceBtn.querySelector('.label-text').textContent = file.name;
       depthSourceBtn.classList.add('loaded');
