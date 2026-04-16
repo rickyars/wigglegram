@@ -147,7 +147,8 @@
     padding: 0 0.2rem;
   }
   .splat-mode-btn.active { color: var(--green); }
-  .splat-mode-btn:hover:not(.active) { color: var(--text); }
+  .splat-mode-btn:hover:not(.active):not(.disabled) { color: var(--text); }
+  .splat-mode-btn.disabled { pointer-events: none; opacity: 0.35; }
 
   /* ─── GIF PREVIEW ─────────────────────────────────────────── */
   .gif-preview-panel {
@@ -428,6 +429,9 @@ sharp predict -i your_image.jpg -o output/</pre>
     outputWidth: 800,
     invertDepth: false,
     splatZoom: 0.5,
+    splatSwingAngle: 5,
+    splatOffsetX: 0,
+    splatOffsetY: 0,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
