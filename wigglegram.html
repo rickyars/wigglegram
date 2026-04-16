@@ -489,7 +489,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       },
     }).on('change', (ev) => {
       updateModeUI(ev.value);
-      if (activeDepthSource instanceof SplatDepthSource && activeDepthSource.mode === '3d') {
+      if (activeDepthSource instanceof SplatDepthSource) {
         activeDepthSource.stopOscillation();
         activeDepthSource.startOscillation(ev.value, PARAMS);
       }
@@ -631,31 +631,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
   };
 
-  function scaleBakedDepth(depth, srcW, srcH, dstW, dstH) {
-    const src = document.createElement('canvas');
-    src.width = srcW; src.height = srcH;
-    const sCtx = src.getContext('2d');
-    const imgData = sCtx.createImageData(srcW, srcH);
-    for (let i = 0; i < depth.length; i++) {
-      const v = Math.round(depth[i] * 255);
-      imgData.data[i * 4]     = v;
-      imgData.data[i * 4 + 1] = v;
-      imgData.data[i * 4 + 2] = v;
-      imgData.data[i * 4 + 3] = 255;
-    }
-    sCtx.putImageData(imgData, 0, 0);
-    const dst = document.createElement('canvas');
-    dst.width = dstW; dst.height = dstH;
-    const dstCtx = dst.getContext('2d', { willReadFrequently: true });
-    dstCtx.drawImage(src, 0, 0, dstW, dstH);
-    const scaled = dstCtx.getImageData(0, 0, dstW, dstH);
-    const out = new Float32Array(dstW * dstH);
-    for (let i = 0; i < out.length; i++) {
-      out[i] = scaled.data[i * 4] / 255;
-    }
-    return out;
-  }
-
   class LuminanceDepthSource {
     constructor(srcImageData) {
       this.srcImageData = srcImageData;
@@ -779,122 +754,14 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.basePos = null;
       this._sceneCenter = null;
       this.oscId = null;
-      this.depthTarget = null;
-      this.depthReadTarget = null;
-      this.depthMaterial = null;
       this._originalCanvas = null;
       this._glCanvas = null;
       this._lastMode = null;
       this._lastParams = null;
-      this.mode = 'depth';
-      this.bakedDepth = null;
-      this.bakedWidth = 0;
-      this.bakedHeight = 0;
     }
 
     stopOscillation() {
       if (this.oscId) { cancelAnimationFrame(this.oscId); this.oscId = null; }
-    }
-
-    async _bakeDepth(THREE) {
-      if (!this.viewer || !this.camera || !this.renderer) return;
-      const w = this.renderer.domElement.width;
-      const h = this.renderer.domElement.height;
-      const splatMesh = this.viewer.getSplatMesh();
-      const splatCount = splatMesh.getSplatCount();
-      if (!splatCount) return;
-
-      // Bake depth from the source-camera viewpoint (origin). The splat was reconstructed
-      // from the source photo whose camera was at the COLMAP origin. After the 180-degree
-      // X-axis rotation applied at load, that origin maps to Three.js (0,0,0). Baking from
-      // there ensures the depth map aligns pixel-for-pixel with the source image.
-      const bakeCam = new THREE.PerspectiveCamera(60, w / h, 0.1, 500);
-      const sc = this._sceneCenter;
-      bakeCam.position.set(0, 0, 0);
-      bakeCam.lookAt(sc ? sc.x : 0, sc ? sc.y : 0, sc ? sc.z : -1);
-      bakeCam.updateMatrixWorld();
-      const zBuf = new Float32Array(w * h).fill(Infinity);
-      const viewMatrix = new THREE.Matrix4().copy(bakeCam.matrixWorld).invert();
-      const projMat = new THREE.Matrix4().multiplyMatrices(bakeCam.projectionMatrix, viewMatrix);
-      const p = new THREE.Vector3();
-      const camPos = bakeCam.position;
-      const step = Math.max(1, Math.floor(splatCount / 30000));
-
-      for (let i = 0; i < splatCount; i += step) {
-        splatMesh.getSplatCenter(i, p, true);
-        const wx = p.x, wy = p.y, wz = p.z;
-        p.applyMatrix4(projMat);
-        if (p.z < -1 || p.z > 1) continue;
-        const sx = Math.round((p.x * 0.5 + 0.5) * (w - 1));
-        const sy = Math.round((1 - (p.y * 0.5 + 0.5)) * (h - 1));
-        if (sx < 0 || sx >= w || sy < 0 || sy >= h) continue;
-        const dist = Math.sqrt((wx - camPos.x) ** 2 + (wy - camPos.y) ** 2 + (wz - camPos.z) ** 2);
-        const idx = sy * w + sx;
-        if (dist < zBuf[idx]) zBuf[idx] = dist;
-      }
-
-      // Normalize distances to [0,1] where 1=near, 0=far
-      let minD = Infinity, maxD = 0;
-      for (let i = 0; i < zBuf.length; i++) {
-        if (zBuf[i] !== Infinity) {
-          if (zBuf[i] < minD) minD = zBuf[i];
-          if (zBuf[i] > maxD) maxD = zBuf[i];
-        }
-      }
-      const range = (maxD - minD) || 1;
-      const depth = new Float32Array(w * h);
-      for (let i = 0; i < depth.length; i++) {
-        depth[i] = zBuf[i] === Infinity ? 0 : 1 - (zBuf[i] - minD) / range;
-      }
-
-      // Multi-pass dilation to fill holes left by sparse point projection (5 passes)
-      let cur = depth;
-      // 8 dilation passes fill small gaps between splats without spreading foreground
-      // depth values too far into empty background regions.
-      for (let pass = 0; pass < 8; pass++) {
-        const next = new Float32Array(cur);
-        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-          const idx = y * w + x;
-          if (cur[idx] > 0) continue;
-          let sum = 0, cnt = 0;
-          if (cur[idx - 1] > 0) { sum += cur[idx - 1]; cnt++; }
-          if (cur[idx + 1] > 0) { sum += cur[idx + 1]; cnt++; }
-          if (cur[idx - w] > 0) { sum += cur[idx - w]; cnt++; }
-          if (cur[idx + w] > 0) { sum += cur[idx + w]; cnt++; }
-          if (cnt) next[idx] = sum / cnt;
-        }
-        cur = next;
-      }
-
-      // Smooth depth edges — averaging with zero neighbors creates a gradient at
-      // object boundaries, reducing the sharp depth discontinuities that cause pixel ripping.
-      for (let pass = 0; pass < 3; pass++) {
-        const smth = new Float32Array(cur);
-        for (let y = 1; y < h - 1; y++) for (let x = 1; x < w - 1; x++) {
-          const idx = y * w + x;
-          smth[idx] = (cur[idx] + cur[idx - 1] + cur[idx + 1] + cur[idx - w] + cur[idx + w]) / 5;
-        }
-        cur = smth;
-      }
-
-      this.bakedDepth = cur;
-      this.bakedWidth = w;
-      this.bakedHeight = h;
-    }
-
-    setMode(mode) {
-      this.mode = mode;
-      if (mode === '3d') {
-        if (this._originalCanvas) this._originalCanvas.style.display = 'none';
-        if (this._glCanvas) this._glCanvas.style.display = '';
-        if (this._lastMode && this._lastParams) {
-          this.startOscillation(this._lastMode, this._lastParams);
-        }
-      } else {
-        this.stopOscillation();
-        if (this._glCanvas) this._glCanvas.style.display = 'none';
-        if (this._originalCanvas) this._originalCanvas.style.display = '';
-      }
     }
 
     dispose() {
@@ -909,17 +776,12 @@ sharp predict -i your_image.jpg -o output/</pre>
       }
       if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
       if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
-      if (this.depthTarget) { this.depthTarget.dispose(); this.depthTarget = null; }
-      if (this.depthReadTarget) { this.depthReadTarget.dispose(); this.depthReadTarget = null; }
-      if (this.depthMaterial) { this.depthMaterial.dispose(); this.depthMaterial = null; }
     }
 
     async load(file, paneCanvas) {
       this.stopOscillation();
       if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
       if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
-      if (this.depthTarget) { this.depthTarget.dispose(); this.depthTarget = null; }
-      if (this.depthReadTarget) { this.depthReadTarget.dispose(); this.depthReadTarget = null; }
 
       this.file = file;
 
@@ -1079,67 +941,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.renderer = renderer;
       this.basePos = camera.position.clone();
 
-      // Depth extraction render targets
-      this.depthTarget = new THREE.WebGLRenderTarget(w, h, {
-        depthBuffer: true,
-        depthTexture: new THREE.DepthTexture(w, h, THREE.FloatType),
-      });
-
-      this.depthReadTarget = new THREE.WebGLRenderTarget(w, h, {
-        type: THREE.FloatType,
-      });
-
-      // Full-screen quad material for linearizing depth
-      this.depthMaterial = new THREE.ShaderMaterial({
-        uniforms: {
-          depthTex: { value: this.depthTarget.depthTexture },
-        },
-        vertexShader: `
-          varying vec2 vUv;
-          void main() {
-            vUv = uv;
-            gl_Position = vec4(position.xy, 0.0, 1.0);
-          }
-        `,
-        fragmentShader: `
-          uniform sampler2D depthTex;
-          varying vec2 vUv;
-          void main() {
-            float z = texture2D(depthTex, vUv).r;
-            float near = 0.1;
-            float far = 500.0;
-            float linear = (2.0 * near * far) / (far + near - (z * 2.0 - 1.0) * (far - near));
-            gl_FragColor = vec4(linear / far, 0.0, 0.0, 1.0);
-          }
-        `,
-        depthWrite: false,
-        depthTest: false,
-      });
-
-      await this._bakeDepth(THREE);
-      this.mode = 'depth';
-      if (this._glCanvas) this._glCanvas.style.display = 'none';
-      if (this._originalCanvas) this._originalCanvas.style.display = '';
       setStatus('splat loaded', 'done');
-    }
-
-    renderToPane(canvas) {
-      if (this.mode === '3d') return; // live render already running via rAF loop
-      if (!this.bakedDepth) return;
-      const w = this.bakedWidth;
-      const h = this.bakedHeight;
-      canvas.width = w;
-      canvas.height = h;
-      const ctx = canvas.getContext('2d');
-      const img = ctx.createImageData(w, h);
-      for (let i = 0; i < this.bakedDepth.length; i++) {
-        const v = Math.round(this.bakedDepth[i] * 255);
-        img.data[i * 4]     = v;
-        img.data[i * 4 + 1] = v;
-        img.data[i * 4 + 2] = v;
-        img.data[i * 4 + 3] = 255;
-      }
-      ctx.putImageData(img, 0, 0);
     }
 
     repositionCamera(zoomMultiplier) {
@@ -1189,23 +991,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
-      if (this.mode === 'depth') {
-        const angle = (frameIndex / totalFrames) * 2 * Math.PI;
-        const xOffset = params.baseline * Math.sin(angle);
-        const width = scaledSrc.width;
-        const height = scaledSrc.height;
-        let colorData;
-        if (mode === 'orbit') {
-          colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
-        } else if (mode === 'parallax') {
-          colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
-        } else if (mode === 'warp') {
-          colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
-        } else {
-          colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
-        }
-        return { colorData, depthArray: scaledDepth, width, height };
-      }
       if (!this.viewer || !this.camera || !this.renderer) return null;
 
       const THREE = await import('three');
@@ -1243,39 +1028,8 @@ sharp predict -i your_image.jpg -o output/</pre>
         colorData.set(colorPixelsRaw.subarray(srcRow, srcRow + w * 4), dstRow);
       }
 
-      // Render to depthTarget to capture depth buffer
-      this.renderer.setRenderTarget(this.depthTarget);
-      this.viewer.update();
-      this.viewer.render();
-      this.renderer.setRenderTarget(null);
-
-      // Render linearized depth to depthReadTarget using full-screen quad
-      const quadGeo = new THREE.PlaneGeometry(2, 2);
-      const quadMesh = new THREE.Mesh(quadGeo, this.depthMaterial);
-      const depthScene = new THREE.Scene();
-      depthScene.add(quadMesh);
-      const orthoCamera = new THREE.OrthographicCamera(-1, 1, 1, -1, -1, 1);
-
-      this.renderer.setRenderTarget(this.depthReadTarget);
-      this.renderer.render(depthScene, orthoCamera);
-      this.renderer.setRenderTarget(null);
-
-      // Cleanup temporary objects
-      quadGeo.dispose();
-
-      // Read depth pixels
-      const depthPixelsRaw = new Float32Array(w * h * 4);
-      this.renderer.readRenderTargetPixels(this.depthReadTarget, 0, 0, w, h, depthPixelsRaw);
-
-      // Extract red channel and flip vertically
+      // No bokeh depth in 3D mode — the splat renderer handles perspective correctly.
       const depthArray = new Float32Array(w * h);
-      for (let y = 0; y < h; y++) {
-        const srcRow = (h - 1 - y) * w;
-        const dstRow = y * w;
-        for (let x = 0; x < w; x++) {
-          depthArray[dstRow + x] = depthPixelsRaw[(srcRow + x) * 4];
-        }
-      }
 
       return { colorData, depthArray, width: w, height: h };
     }
@@ -1894,20 +1648,13 @@ sharp predict -i your_image.jpg -o output/</pre>
     setStatus('scaling image...', 'working');
     setProgress(0);
 
-    const isSplat3D = activeDepthSource instanceof SplatDepthSource && activeDepthSource.mode === '3d';
-    const isSplatDepth = activeDepthSource instanceof SplatDepthSource && activeDepthSource.mode === 'depth';
+    const isSplat3D = activeDepthSource instanceof SplatDepthSource;
 
     if (isSplat3D && !activeDepthSource.viewer) {
       setStatus('splat not fully loaded yet — please wait', 'error');
       generateBtn.disabled = false;
       return;
     }
-    if (isSplatDepth && !activeDepthSource.bakedDepth) {
-      setStatus('splat depth not ready yet — please wait', 'error');
-      generateBtn.disabled = false;
-      return;
-    }
-
     let width, height, scaledSrc, depth, blurredSrc;
     let origW = 800, origH = 480;
 
@@ -1943,13 +1690,6 @@ sharp predict -i your_image.jpg -o output/</pre>
         ctx.drawImage(rawCanvas, 0, 0, width, height);
         const scaledDepthData = ctx.getImageData(0, 0, width, height);
         depth = computeLuminanceDepth(scaledDepthData, invert);
-      } else if (isSplatDepth) {
-        depth = scaleBakedDepth(
-          activeDepthSource.bakedDepth,
-          activeDepthSource.bakedWidth,
-          activeDepthSource.bakedHeight,
-          width, height
-        );
       } else {
         // LuminanceDepthSource: compute from scaled source
         depth = computeLuminanceDepth(scaledSrc, invert);
@@ -1969,10 +1709,6 @@ sharp predict -i your_image.jpg -o output/</pre>
       width = targetWidth;
       height = Math.round(origH * scale);
       activeDepthSource.renderer.setSize(width, height, false);
-      if (activeDepthSource.depthTarget) {
-        activeDepthSource.depthTarget.setSize(width, height);
-        activeDepthSource.depthReadTarget.setSize(width, height);
-      }
       scaledSrc = null;
       depth = null;
       blurredSrc = null;
@@ -2050,10 +1786,6 @@ sharp predict -i your_image.jpg -o output/</pre>
 
       if (isSplat3D && activeDepthSource && activeDepthSource.renderer && (width !== origW || height !== origH)) {
         activeDepthSource.renderer.setSize(origW, origH, false);
-        if (activeDepthSource.depthTarget) {
-          activeDepthSource.depthTarget.setSize(origW, origH);
-          activeDepthSource.depthReadTarget.setSize(origW, origH);
-        }
       }
 
       // Resume splat oscillation after capture
