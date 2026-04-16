@@ -1,7 +1,7 @@
 # Splat UX Fixes Design
 
 **Date:** 2026-04-15  
-**Status:** Approved
+**Status:** Approved (amended: added Y offset)
 
 ## Overview
 
@@ -52,6 +52,7 @@ Five folders replace the current Motion / Optics / Output layout. Visibility is 
 ### Splat (visible only when a splat is loaded)
 - `zoom` — camera distance multiplier, range 0.1–3.0, step 0.05
 - `X offset` — horizontal shift of the look-at point, range -2.0–2.0, step 0.05, default 0
+- `Y offset` — vertical shift of the look-at point, range -2.0–2.0, step 0.05, default 0
 
 ### Optics (always visible)
 - `bokeh coc`, `focus dist`, `light wrap`, `chromatic aberr`
@@ -96,17 +97,18 @@ The old formula tied the angle to both `baseline` (in pixels) and `fov`, making 
 
 ### What changes
 
-Add `PARAMS.splatOffsetX = 0` to the global params object.
+Add `PARAMS.splatOffsetX = 0` and `PARAMS.splatOffsetY = 0` to the global params object.
 
-In `repositionCamera()` and `positionCamera()`, shift the look-at point (not the camera position) by the offset:
+In `repositionCamera()` and `positionCamera()`, shift the look-at point (not the camera position) by the offsets:
 
 ```js
 const lookX = center.x + PARAMS.splatOffsetX;
-camera.lookAt(lookX, center.y, center.z);
+const lookY = center.y + PARAMS.splatOffsetY;
+camera.lookAt(lookX, lookY, center.z);
 // camera.position is set by the orbiting math, unchanged
 ```
 
-The X offset slider should call `repositionCamera()` on change (same pattern as zoom) so the live preview updates immediately.
+Both offset sliders call `repositionCamera()` on change (same pattern as zoom) so the live preview updates immediately.
 
 The X offset slider in the Splat folder drives this value. Changing it during live preview immediately repositions the camera.
 
@@ -128,6 +130,7 @@ Automatic centering from the splat bbox can be off depending on the scene's COLM
 | invert depth | Depth map | depth map loaded |
 | zoom | Splat | splat loaded |
 | X offset | Splat | splat loaded |
+| Y offset | Splat | splat loaded |
 | bokeh coc | Optics | always |
 | focus dist | Optics | always |
 | light wrap | Optics | always |
