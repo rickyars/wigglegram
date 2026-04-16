@@ -466,60 +466,92 @@ sharp predict -i your_image.jpg -o output/</pre>
   })();
 
   // ─── TWEAKPANE SETUP ───────────────────────────────────────────────────────
-  let fovBinding = null;
-  let baselineBinding = null;
-  let motionFolder = null;
-
   function setupTweakpane() {
     const pane = new Tweakpane.Pane({
       container: document.getElementById('tweakpane-container'),
       title: 'parameters',
     });
 
-    // ── Motion folder ──
-    const motion = pane.addFolder({ title: 'Motion' });
-    motionFolder = motion;
+    // ── Motion (always visible) ──
+    const motionFolder = pane.addFolder({ title: 'Motion' });
+    window._motionFolder = motionFolder;
 
-    motion.addBinding(PARAMS, 'mode', {
-      label: 'effect mode',
-      options: {
-        'orbit': 'orbit',
-        'parallax': 'parallax',
-        'warp': 'warp',
-      },
-    }).on('change', (ev) => {
-      updateModeUI(ev.value);
-      if (activeDepthSource instanceof SplatDepthSource) {
-        activeDepthSource.stopOscillation();
-        activeDepthSource.startOscillation(ev.value, PARAMS);
-      }
-    });
-
-    baselineBinding = motion.addBinding(PARAMS, 'baseline', {
+    // motion amount binding — disposed and recreated on context change
+    window._motionBinding = motionFolder.addBinding(PARAMS, 'baseline', {
       label: 'baseline',
       min: 1, max: 15, step: 0.5,
     });
 
-    motion.addBinding(PARAMS, 'frames', {
-      label: 'frames',
-      min: 4, max: 20, step: 2,
-    });
-
-    motion.addBinding(PARAMS, 'frameDelay', {
-      label: 'frame delay (ms)',
-      min: 30, max: 200, step: 10,
-    });
-
-    fovBinding = motion.addBinding(PARAMS, 'fov', {
+    window._fovBinding = motionFolder.addBinding(PARAMS, 'fov', {
       label: 'fov',
       min: 20, max: 80, step: 1,
     });
 
+    motionFolder.addBinding(PARAMS, 'frames', {
+      label: 'frames',
+      min: 4, max: 20, step: 2,
+    });
 
-    // ── Optics folder ──
-    const optics = pane.addFolder({ title: 'Optics' });
+    motionFolder.addBinding(PARAMS, 'frameDelay', {
+      label: 'frame delay (ms)',
+      min: 30, max: 200, step: 10,
+    });
 
-    optics.addBinding(PARAMS, 'bokehCoc', {
+    // ── Depth map (hidden until a depth image is loaded) ──
+    const depthFolder = pane.addFolder({ title: 'Depth map' });
+    depthFolder.hidden = true;
+    window._depthFolder = depthFolder;
+
+    depthFolder.addBinding(PARAMS, 'mode', {
+      label: 'effect mode',
+      options: { orbit: 'orbit', parallax: 'parallax', warp: 'warp' },
+    }).on('change', (ev) => {
+      updateMotionBinding(ev.value, false);
+    });
+
+    depthFolder.addBinding(PARAMS, 'invertDepth', { label: 'invert depth' })
+      .on('change', () => {
+        if (activeDepthSource && !(activeDepthSource instanceof SplatDepthSource)) {
+          activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+        }
+      });
+
+    // ── Splat (hidden until a splat is loaded) ──
+    const splatFolder = pane.addFolder({ title: 'Splat' });
+    splatFolder.hidden = true;
+    window._splatFolder = splatFolder;
+
+    splatFolder.addBinding(PARAMS, 'splatZoom', {
+      label: 'zoom',
+      min: 0.1, max: 3.0, step: 0.05,
+    }).on('change', (ev) => {
+      if (activeDepthSource instanceof SplatDepthSource) {
+        activeDepthSource.repositionCamera(ev.value);
+      }
+    });
+
+    splatFolder.addBinding(PARAMS, 'splatOffsetX', {
+      label: 'X offset',
+      min: -2.0, max: 2.0, step: 0.05,
+    }).on('change', () => {
+      if (activeDepthSource instanceof SplatDepthSource) {
+        activeDepthSource.repositionCamera(PARAMS.splatZoom);
+      }
+    });
+
+    splatFolder.addBinding(PARAMS, 'splatOffsetY', {
+      label: 'Y offset',
+      min: -2.0, max: 2.0, step: 0.05,
+    }).on('change', () => {
+      if (activeDepthSource instanceof SplatDepthSource) {
+        activeDepthSource.repositionCamera(PARAMS.splatZoom);
+      }
+    });
+
+    // ── Optics (always visible) ──
+    const opticsFolder = pane.addFolder({ title: 'Optics' });
+
+    opticsFolder.addBinding(PARAMS, 'bokehCoc', {
       label: 'bokeh coc',
       min: 0, max: 40, step: 1,
     }).on('change', () => {
@@ -528,90 +560,73 @@ sharp predict -i your_image.jpg -o output/</pre>
       }
     });
 
-    optics.addBinding(PARAMS, 'focusDist', {
+    opticsFolder.addBinding(PARAMS, 'focusDist', {
       label: 'focus dist',
       min: 0, max: 1, step: 0.01,
     });
 
-    optics.addBinding(PARAMS, 'lightWrap', {
+    opticsFolder.addBinding(PARAMS, 'lightWrap', {
       label: 'light wrap',
       min: 0, max: 5, step: 0.5,
     });
 
-    optics.addBinding(PARAMS, 'chromaticAberr', {
+    opticsFolder.addBinding(PARAMS, 'chromaticAberr', {
       label: 'chromatic aberr',
       min: 0, max: 1.5, step: 0.1,
     });
 
-    // ── Output folder ──
-    const output = pane.addFolder({ title: 'Output' });
+    // ── Output (always visible) ──
+    const outputFolder = pane.addFolder({ title: 'Output' });
 
-    output.addBinding(PARAMS, 'outputWidth', {
+    outputFolder.addBinding(PARAMS, 'outputWidth', {
       label: 'output width',
       min: 200, max: 3000, step: 100,
     });
-
-    output.addBinding(PARAMS, 'invertDepth', {
-      label: 'invert depth',
-    }).on('change', () => {
-      if (activeDepthSource && !(activeDepthSource instanceof SplatDepthSource)) {
-        activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
-      }
-    });
   }
 
-  let savedParallaxShift = 20;
-
-  function updateModeUI(mode) {
-    if (mode === 'orbit') {
-      savedParallaxShift = PARAMS.baseline;
-      PARAMS.baseline = 6.5;
-      fovBinding.hidden = false;
-      baselineBinding.dispose();
-      const folder = motionFolder;
-      baselineBinding = folder.addBinding(PARAMS, 'baseline', {
+  function updateMotionBinding(effectMode, isSplat) {
+    if (window._motionBinding) {
+      window._motionBinding.dispose();
+      window._motionBinding = null;
+    }
+    if (window._fovBinding) {
+      window._fovBinding.hidden = (effectMode === 'parallax' || effectMode === 'warp');
+    }
+    // Reset baseline to sensible range for mode
+    if (!isSplat) {
+      if (effectMode === 'orbit' || effectMode === 'warp') {
+        if (PARAMS.baseline > 15) PARAMS.baseline = effectMode === 'orbit' ? 6.5 : 3;
+      }
+      // parallax accepts up to 60, no reset needed
+    }
+    const folder = window._motionFolder;
+    if (isSplat) {
+      window._motionBinding = folder.addBinding(PARAMS, 'splatSwingAngle', {
+        label: 'swing angle °',
+        min: 1, max: 20, step: 0.5,
+      });
+    } else if (effectMode === 'orbit') {
+      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
         label: 'baseline',
         min: 1, max: 15, step: 0.5,
       });
-    } else if (mode === 'warp') {
-      PARAMS.baseline = 3;
-      fovBinding.hidden = true;
-      baselineBinding.dispose();
-      const folder = motionFolder;
-      baselineBinding = folder.addBinding(PARAMS, 'baseline', {
-        label: 'amplitude (°)',
-        min: 1, max: 15, step: 0.5,
-      });
-    } else {
-      PARAMS.baseline = savedParallaxShift;
-      fovBinding.hidden = true;
-      baselineBinding.dispose();
-      const folder = motionFolder;
-      baselineBinding = folder.addBinding(PARAMS, 'baseline', {
+    } else if (effectMode === 'parallax') {
+      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
         label: 'parallax shift',
         min: 3, max: 60, step: 1,
       });
+    } else if (effectMode === 'warp') {
+      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
+        label: 'amplitude °',
+        min: 1, max: 15, step: 0.5,
+      });
+    } else {
+      // Fallback: show baseline binding
+      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
+        label: 'baseline',
+        min: 1, max: 15, step: 0.5,
+      });
     }
-  }
-
-  let splatZoomBinding = null;
-
-  function showSplatZoom() {
-    if (splatZoomBinding) return;
-    splatZoomBinding = motionFolder.addBinding(PARAMS, 'splatZoom', {
-      label: 'zoom',
-      min: 0.1, max: 3.0, step: 0.05,
-    }).on('change', (ev) => {
-      if (activeDepthSource instanceof SplatDepthSource) {
-        activeDepthSource.repositionCamera(ev.value);
-      }
-    });
-  }
-
-  function hideSplatZoom() {
-    if (!splatZoomBinding) return;
-    splatZoomBinding.dispose();
-    splatZoomBinding = null;
   }
 
 
@@ -1048,6 +1063,9 @@ sharp predict -i your_image.jpg -o output/</pre>
         document.getElementById('splatDepthBtn').classList.add('disabled');
         document.getElementById('splat3DBtn').classList.add('active');
         document.getElementById('splat3DBtn').classList.remove('disabled');
+        if (window._depthFolder) window._depthFolder.hidden = true;
+        if (window._splatFolder) window._splatFolder.hidden = false;
+        updateMotionBinding(null, true);
       }).catch(err => {
         console.error('splat load error:', err);
         setStatus('splat load failed — check console', 'error');
@@ -1068,6 +1086,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       const imageData = ctx.getImageData(0, 0, sw, sh);
       activeDepthSource = new ImageDepthSource(imageData);
       activeDepthSource.renderToPane(depthPaneCanvas);
+      if (window._depthFolder) window._depthFolder.hidden = false;
+      if (window._splatFolder) window._splatFolder.hidden = true;
+      updateMotionBinding(PARAMS.mode, false);
       document.getElementById('splatModeToggle').classList.add('visible');
       document.getElementById('splatDepthBtn').classList.add('active');
       document.getElementById('splatDepthBtn').classList.remove('disabled');
@@ -1098,12 +1119,14 @@ sharp predict -i your_image.jpg -o output/</pre>
         ctx.drawImage(img, 0, 0);
         srcImageData = ctx.getImageData(0, 0, img.width, img.height);
         activeDepthSource = new LuminanceDepthSource(srcImageData);
-        hideSplatZoom();
+        if (window._splatFolder) window._splatFolder.hidden = true;
+        if (window._depthFolder) window._depthFolder.hidden = true;
         document.getElementById('splatModeToggle').classList.remove('visible');
         activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
         pendingSplatFile = null;
         customDepthData = null;
         customDepthFilename = null;
+        updateMotionBinding(PARAMS.mode, false);
         updateDepthPaneLabel('depth (luminance)');
 
         document.getElementById('previews').classList.add('visible');
@@ -1142,7 +1165,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (activeDepthSource instanceof SplatDepthSource) {
       activeDepthSource.dispose();
     }
-    hideSplatZoom();
+    if (window._splatFolder) window._splatFolder.hidden = true;
+    if (window._depthFolder) window._depthFolder.hidden = true;
     document.getElementById('splatModeToggle').classList.remove('visible');
     pendingSplatFile = null;
     activeDepthSource = new LuminanceDepthSource(srcImageData);
