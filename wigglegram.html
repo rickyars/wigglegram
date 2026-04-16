@@ -964,10 +964,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const startTime = performance.now();
       const tick = () => {
         const t = (performance.now() - startTime) / 1000;
-        // Match the same angular scale used in captureFrame: baseline pixels = same apparent shift as 2D depth mode.
-        const rendW = (this.renderer ? this.renderer.domElement.width : 800) || 800;
-        const oscFovRad = (Math.PI / 180) * 60;
-        const angle = Math.sin(t * Math.PI / 2) * params.baseline * Math.tan(oscFovRad / 2) / (rendW / 2);
+        const angle = Math.sin(t * Math.PI / 2) * (PARAMS.splatSwingAngle * Math.PI / 180);
         this.positionCamera(mode, angle, params);
         this.viewer.update();
         this.viewer.render();
@@ -984,10 +981,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const h = this.renderer.domElement.height;
 
       const rawAngle = (frameIndex / totalFrames) * 2 * Math.PI;
-      // Scale angle so baseline pixels produce the same apparent screen shift as in 2D depth mode.
-      // angle = baseline * tan(fov/2) / (canvas_width/2), derived from: screen_shift = angle * (w/2) / tan(fov/2) = baseline
-      const fovRad = (Math.PI / 180) * 60;
-      const angle = Math.sin(rawAngle) * params.baseline * Math.tan(fovRad / 2) / (w / 2);
+      const angle = Math.sin(rawAngle) * (PARAMS.splatSwingAngle * Math.PI / 180);
       this.positionCamera(mode, angle, params);
 
       // Settle splat sort worker before capture (6 rAF ticks)
