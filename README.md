@@ -172,7 +172,3 @@ The `assets/` directory is for the blue noise texture used to improve bokeh qual
 2. Place it at `assets/LDR_LLL1_0.png`
 
 If the file is not found, the tool falls back to white noise (bokeh edges will look slightly grainier).
-
-## Utilities
-
-- **`npy2gray.py`** — Converts `.npy` depth arrays (e.g. from ARAG) to grayscale PNG images suitable for upload.
