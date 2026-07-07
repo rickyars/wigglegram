@@ -164,7 +164,9 @@
     justify-content: space-between;
   }
 
-  .gif-preview-panel img {
+  .gif-preview-panel img,
+  .gif-preview-panel canvas,
+  .gif-preview-panel video {
     display: block;
     width: 100%;
     max-height: 500px;
@@ -344,12 +346,18 @@
       </div>
     </div>
 
+    <div class="gif-preview-panel" id="livePreviewPanel">
+      <div class="preview-label"><span>live preview</span></div>
+      <canvas id="livePreviewCanvas"></canvas>
+    </div>
+
     <div class="gif-preview-panel" id="gifPreviewPanel">
       <div class="preview-label">
         <span>output</span>
         <button class="download-btn" id="downloadBtn" onclick="downloadGif()">download</button>
       </div>
       <img id="gifPreview" alt="generated wigglegram">
+      <video id="videoPreview" autoplay loop muted playsinline style="display:none"></video>
     </div>
 
     <div class="status" id="status">load an image to begin</div>
@@ -358,9 +366,9 @@
     </div>
 
     <div class="note">
-      bright pixels = near (unless inverted). for a real depth map, run
-      <a href="https://github.com/Dreamaker-MrC/Any-Resolution-Any-Geometry" target="_blank">ARAG</a>
-      locally and supply the output via the depth map upload button. the Depth Source button also accepts .ply splat files.
+      depth is estimated automatically in your browser (Depth Anything V2, ~25MB one-time model download).
+      bright pixels = near (unless inverted). you can also supply your own grayscale depth map or a .ply splat
+      via the Depth Source button.
     </div>
 
     <details id="mlsharpHelp" style="display:none; margin-top:0.5rem; border-left: 2px solid var(--border-active); padding: 0.75rem 1rem; color: var(--text-dim); font-size: 0.72rem; line-height: 1.7;">
@@ -385,6 +393,9 @@ sharp predict -i your_image.jpg -o output/</pre>
         <a href="#" id="clearDepthSourceLink" class="clear-link" style="display:none" onclick="clearDepthSource(event)">[clear]</a>
         <input type="file" id="depthSourceInput" accept="image/*,.ply">
       </label>
+      <button class="upload-btn" id="companionBtn" style="display:none" onclick="generateSplatViaCompanion()">
+        <span class="label-text">Generate Splat (ml-sharp)</span>
+      </button>
     </div>
 
     <div id="tweakpane-container"></div>
@@ -419,7 +430,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   const PARAMS = {
     mode: 'orbit',
     baseline: 6.5,
-    frames: 8,
+    views: 3,
     frameDelay: 100,
     fov: 45,
     bokehCoc: 0,
@@ -428,21 +439,27 @@ sharp predict -i your_image.jpg -o output/</pre>
     chromaticAberr: 0,
     outputWidth: 800,
     invertDepth: false,
-    splatZoom: 0.5,
+    splatZoom: 1.0,
     splatSwingAngle: 5,
     splatOffsetX: 0,
     splatOffsetY: 0,
+    format: 'gif',
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
   let srcImageData = null;
-  let customDepthData = null;
-  let customDepthFilename = null;
+  let srcFile = null;
   let activeDepthSource = null;
-  let pendingSplatFile = null;
-  let currentDepthMap = null;
   let blueNoise = null;
   let gifBlobUrl = null;
+  let gifWorkerUrl = null;
+
+  // Tweakpane UI references (rebuilt on context change)
+  let motionFolder = null;
+  let motionBinding = null;
+  let fovBinding = null;
+  let depthFolder = null;
+  let splatFolder = null;
 
   // ─── BLUE NOISE LOADER ──────────────────────────────────────────────────────
   (async function loadBlueNoise() {
@@ -473,23 +490,22 @@ sharp predict -i your_image.jpg -o output/</pre>
     });
 
     // ── Motion (always visible) ──
-    const motionFolder = pane.addFolder({ title: 'Motion' });
-    window._motionFolder = motionFolder;
+    motionFolder = pane.addFolder({ title: 'Motion' });
 
     // motion amount binding — disposed and recreated on context change
-    window._motionBinding = motionFolder.addBinding(PARAMS, 'baseline', {
+    motionBinding = motionFolder.addBinding(PARAMS, 'baseline', {
       label: 'baseline',
       min: 1, max: 15, step: 0.5,
     });
 
-    window._fovBinding = motionFolder.addBinding(PARAMS, 'fov', {
+    fovBinding = motionFolder.addBinding(PARAMS, 'fov', {
       label: 'fov',
       min: 20, max: 80, step: 1,
     });
 
-    motionFolder.addBinding(PARAMS, 'frames', {
-      label: 'frames',
-      min: 4, max: 20, step: 2,
+    motionFolder.addBinding(PARAMS, 'views', {
+      label: 'views',
+      min: 2, max: 8, step: 1,
     });
 
     motionFolder.addBinding(PARAMS, 'frameDelay', {
@@ -498,9 +514,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     });
 
     // ── Depth map (hidden until a depth image is loaded) ──
-    const depthFolder = pane.addFolder({ title: 'Depth map' });
+    depthFolder = pane.addFolder({ title: 'Depth map' });
     depthFolder.hidden = true;
-    window._depthFolder = depthFolder;
 
     depthFolder.addBinding(PARAMS, 'mode', {
       label: 'effect mode',
@@ -517,9 +532,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       });
 
     // ── Splat (hidden until a splat is loaded) ──
-    const splatFolder = pane.addFolder({ title: 'Splat' });
+    splatFolder = pane.addFolder({ title: 'Splat' });
     splatFolder.hidden = true;
-    window._splatFolder = splatFolder;
 
     splatFolder.addBinding(PARAMS, 'splatZoom', {
       label: 'zoom',
@@ -582,15 +596,23 @@ sharp predict -i your_image.jpg -o output/</pre>
       label: 'output width',
       min: 200, max: 3000, step: 100,
     });
+
+    outputFolder.addBinding(PARAMS, 'format', {
+      label: 'format',
+      options: { gif: 'gif', 'video (webm/mp4)': 'video' },
+    });
+
+    // Any parameter change refreshes the live preview (no-op in splat mode)
+    pane.on('change', () => schedulePreviewRebuild());
   }
 
   function updateMotionBinding(effectMode, isSplat) {
-    if (window._motionBinding) {
-      window._motionBinding.dispose();
-      window._motionBinding = null;
+    if (motionBinding) {
+      motionBinding.dispose();
+      motionBinding = null;
     }
-    if (window._fovBinding) {
-      window._fovBinding.hidden = (effectMode === 'parallax' || effectMode === 'warp');
+    if (fovBinding) {
+      fovBinding.hidden = (effectMode === 'parallax' || effectMode === 'warp');
     }
     // Reset baseline to sensible range for mode
     if (!isSplat) {
@@ -599,36 +621,81 @@ sharp predict -i your_image.jpg -o output/</pre>
       }
       // parallax accepts up to 60, no reset needed
     }
-    const folder = window._motionFolder;
     if (isSplat) {
-      window._motionBinding = folder.addBinding(PARAMS, 'splatSwingAngle', {
+      motionBinding = motionFolder.addBinding(PARAMS, 'splatSwingAngle', {
         label: 'swing angle °',
         min: 1, max: 20, step: 0.5,
       });
-    } else if (effectMode === 'orbit') {
-      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
-        label: 'baseline',
-        min: 1, max: 15, step: 0.5,
-      });
     } else if (effectMode === 'parallax') {
-      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
+      motionBinding = motionFolder.addBinding(PARAMS, 'baseline', {
         label: 'parallax shift',
         min: 3, max: 60, step: 1,
       });
     } else if (effectMode === 'warp') {
-      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
+      motionBinding = motionFolder.addBinding(PARAMS, 'baseline', {
         label: 'amplitude °',
         min: 1, max: 15, step: 0.5,
       });
     } else {
-      // Fallback: show baseline binding
-      window._motionBinding = folder.addBinding(PARAMS, 'baseline', {
+      // orbit and fallback share the same binding
+      motionBinding = motionFolder.addBinding(PARAMS, 'baseline', {
         label: 'baseline',
         min: 1, max: 15, step: 0.5,
       });
     }
   }
 
+
+  // Draw a normalized depth array to a canvas as grayscale
+  function drawDepthToCanvas(canvas, depth, width, height) {
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(width, height);
+    for (let i = 0; i < depth.length; i++) {
+      const v = Math.round(depth[i] * 255);
+      img.data[i * 4] = v;
+      img.data[i * 4 + 1] = v;
+      img.data[i * 4 + 2] = v;
+      img.data[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, 0, 0);
+  }
+
+  // Classic wigglegram sampling: `views` discrete viewpoints evenly spaced
+  // across the baseline, played ping-pong (1-2-3-2-...) so the loop is seamless.
+  // positions are normalized offsets in [-1, 1]; seq indexes into them.
+  function buildViewSequence() {
+    const n = Math.max(2, Math.round(PARAMS.views));
+    const positions = Array.from({ length: n }, (_, v) => -1 + (2 * v) / (n - 1));
+    const seq = Array.from({ length: n }, (_, v) => v);
+    for (let v = n - 2; v >= 1; v--) seq.push(v);
+    return { positions, seq };
+  }
+
+  // Shared 2D frame synthesis for depth-map sources. t is the normalized
+  // viewpoint offset in [-1, 1].
+  async function captureDepthMapFrame(t, mode, params, scaledSrc, scaledDepth) {
+    const xOffset = params.baseline * t;
+    const width = scaledSrc.width;
+    const height = scaledSrc.height;
+    let colorData;
+
+    if (mode === 'orbit') {
+      colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
+    } else if (mode === 'warp') {
+      colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
+    } else {
+      colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+    }
+
+    return {
+      colorData,
+      depthArray: scaledDepth,
+      width,
+      height,
+    };
+  }
 
   class LuminanceDepthSource {
     constructor(srcImageData) {
@@ -637,44 +704,10 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     renderToPane(canvas) {
       const depth = getDepthMap(this.srcImageData);
-      canvas.width = this.srcImageData.width;
-      canvas.height = this.srcImageData.height;
-      const ctx = canvas.getContext('2d');
-      const img = ctx.createImageData(this.srcImageData.width, this.srcImageData.height);
-      for (let i = 0; i < depth.length; i++) {
-        const v = Math.round(depth[i] * 255);
-        img.data[i * 4] = v;
-        img.data[i * 4 + 1] = v;
-        img.data[i * 4 + 2] = v;
-        img.data[i * 4 + 3] = 255;
-      }
-      ctx.putImageData(img, 0, 0);
+      drawDepthToCanvas(canvas, depth, this.srcImageData.width, this.srcImageData.height);
     }
 
-    async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
-      const angle = (frameIndex / totalFrames) * 2 * Math.PI;
-      const xOffset = params.baseline * Math.sin(angle);
-      const width = scaledSrc.width;
-      const height = scaledSrc.height;
-      let colorData;
-
-      if (mode === 'orbit') {
-        colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
-      } else if (mode === 'parallax') {
-        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
-      } else if (mode === 'warp') {
-        colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
-      } else {
-        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
-      }
-
-      return {
-        colorData,
-        depthArray: scaledDepth,
-        width,
-        height,
-      };
-    }
+    captureFrame(...args) { return captureDepthMapFrame(...args); }
   }
 
   class ImageDepthSource {
@@ -706,41 +739,66 @@ sharp predict -i your_image.jpg -o output/</pre>
       depth = boxBlur(depth, width, height, smoothR);
       depth = boxBlur(depth, width, height, smoothR);
 
-      const ctx = canvas.getContext('2d');
-      const img = ctx.createImageData(width, height);
-      for (let i = 0; i < depth.length; i++) {
-        const v = Math.round(depth[i] * 255);
-        img.data[i * 4] = v;
-        img.data[i * 4 + 1] = v;
-        img.data[i * 4 + 2] = v;
-        img.data[i * 4 + 3] = 255;
-      }
-      ctx.putImageData(img, 0, 0);
+      drawDepthToCanvas(canvas, depth, width, height);
     }
 
-    async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
-      const angle = (frameIndex / totalFrames) * 2 * Math.PI;
-      const xOffset = params.baseline * Math.sin(angle);
-      const width = scaledSrc.width;
-      const height = scaledSrc.height;
-      let colorData;
+    captureFrame(...args) { return captureDepthMapFrame(...args); }
+  }
 
-      if (mode === 'orbit') {
-        colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
-      } else if (mode === 'parallax') {
-        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
-      } else if (mode === 'warp') {
-        colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
-      } else {
-        colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+  // Parse ml-sharp PLY sidecar elements (extrinsic camera pose, intrinsic K
+  // matrix, image size). Returns null for PLYs without them. Reads only the
+  // header and the small tail elements — never the vertex block.
+  async function parseSharpPlyMeta(file) {
+    try {
+      const headBuf = await file.slice(0, 4096).arrayBuffer();
+      const headText = new TextDecoder().decode(headBuf);
+      const endIdx = headText.indexOf('end_header');
+      if (endIdx < 0) return null;
+      const header = headText.slice(0, endIdx);
+      if (!header.includes('element extrinsic') || !header.includes('element intrinsic')) return null;
+      if (!header.includes('binary_little_endian')) return null;
+
+      const sizeOf = { float: 4, double: 8, uint: 4, int: 4, ushort: 2, short: 2, uchar: 1, char: 1 };
+      const elements = [];
+      let cur = null;
+      for (const raw of header.split('\n')) {
+        const line = raw.trim();
+        const em = line.match(/^element (\w+) (\d+)$/);
+        if (em) { cur = { name: em[1], count: +em[2], rowBytes: 0 }; elements.push(cur); continue; }
+        const pm = line.match(/^property (\w+) \w+$/);
+        if (pm && cur) cur.rowBytes += sizeOf[pm[1]] || 4;
       }
 
-      return {
-        colorData,
-        depthArray: scaledDepth,
-        width,
-        height,
+      let offset = endIdx + 'end_header'.length + 1; // past trailing newline
+      const byteOffsets = {};
+      for (const el of elements) {
+        byteOffsets[el.name] = offset;
+        offset += el.count * el.rowBytes;
+      }
+
+      const readFloats = async (name, n) => {
+        const start = byteOffsets[name];
+        const buf = await file.slice(start, start + n * 4).arrayBuffer();
+        return Array.from(new Float32Array(buf));
       };
+      const extrinsic = await readFloats('extrinsic', 16);
+      const intrinsic = await readFloats('intrinsic', 9);
+      const sizeBuf = await file.slice(byteOffsets.image_size, byteOffsets.image_size + 8).arrayBuffer();
+      const imageSize = Array.from(new Uint32Array(sizeBuf));
+
+      // Only handle identity extrinsic (ml-sharp predicts in the source
+      // camera's frame, so this is the normal case).
+      const identity = [1,0,0,0, 0,1,0,0, 0,0,1,0, 0,0,0,1];
+      const isIdentity = extrinsic.every((v, i) => Math.abs(v - identity[i]) < 1e-4);
+      if (!isIdentity) return null;
+
+      const fy = intrinsic[4];
+      const imgH = imageSize[1];
+      const fovDeg = (fy > 0 && imgH > 0) ? (2 * Math.atan((imgH / 2) / fy) * 180 / Math.PI) : null;
+      return { fovDeg };
+    } catch (e) {
+      console.warn('parseSharpPlyMeta failed:', e);
+      return null;
     }
   }
 
@@ -763,6 +821,19 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (this.oscId) { cancelAnimationFrame(this.oscId); this.oscId = null; }
     }
 
+    // Hide the 3D view without unloading the splat (for the [depth]/[3D] toggle)
+    deactivate() {
+      this.stopOscillation();
+      if (this._glCanvas) this._glCanvas.style.display = 'none';
+      if (this._originalCanvas) this._originalCanvas.style.display = '';
+    }
+
+    reactivate() {
+      if (this._originalCanvas) this._originalCanvas.style.display = 'none';
+      if (this._glCanvas) this._glCanvas.style.display = '';
+      this.startOscillation(this._lastMode || PARAMS.mode, this._lastParams || PARAMS);
+    }
+
     dispose() {
       this.stopOscillation();
       if (this._glCanvas && this._glCanvas.parentElement) {
@@ -783,6 +854,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
 
       this.file = file;
+
+      // ml-sharp PLYs embed the source camera; null for generic splats
+      const meta = await parseSharpPlyMeta(file);
+      if (meta) console.log('[SplatDepthSource] ml-sharp camera meta:', meta);
 
       setStatus('loading splat libraries...', 'working');
       let THREE, GS3D;
@@ -859,58 +934,69 @@ sharp predict -i your_image.jpg -o output/</pre>
         if (pollMs > 0) console.log('[SplatDepthSource] waited ' + pollMs + 'ms for splat data');
         let center = new THREE.Vector3(0, 0, 0);
 
-        // Sample splat world-space positions and build a robust bbox (outliers filtered at 3x RMS).
-        let bbox = null;
+        // Sample splat world-space positions
+        const pts = [];
         const splatCount = splatMesh.getSplatCount();
         if (splatCount > 0) {
           try {
             const step = Math.max(1, Math.floor(splatCount / 500));
-            const pts = [];
-            const centroid = new THREE.Vector3();
             for (let i = 0; i < splatCount; i += step) {
               const p = new THREE.Vector3();
               splatMesh.getSplatCenter(i, p, true);
               pts.push(p);
-              centroid.add(p);
             }
-            centroid.divideScalar(pts.length);
-            let sumSq = 0;
-            for (const p of pts) sumSq += p.distanceToSquared(centroid);
-            const rms = Math.sqrt(sumSq / pts.length);
-            const maxDist = Math.max(rms * 3, 0.01);
-            bbox = new THREE.Box3();
-            let inlierSumY = 0, inlierCount = 0;
-            for (const p of pts) {
-              if (p.distanceTo(centroid) <= maxDist) {
-                bbox.expandByPoint(p);
-                inlierSumY += p.y;
-                inlierCount++;
-              }
-            }
-            if (bbox.isEmpty()) { bbox = null; } else if (inlierCount > 0) {
-              // Use mean Y of inlier points - more robust than bbox midpoint Y
-              // (bbox midpoint is skewed by sparse sky/background splats at extreme Y)
-              bbox._inlierMeanY = inlierSumY / inlierCount;
-            }
-            if (bbox && !bbox.isEmpty() && bbox.isEmpty()) bbox = null;
           } catch(e) {
-            console.warn('Could not sample splat positions for bbox:', e);
-            bbox = null;
+            console.warn('Could not sample splat positions:', e);
           }
         }
-        
-        let autoFitDist = 3.0; // fallback if bbox unavailable
-        if (bbox && !bbox.isEmpty()) {
-          bbox.getCenter(center);
-          if (typeof bbox._inlierMeanY === 'number') center.y = bbox._inlierMeanY;
-          const sphere = new THREE.Sphere();
-          bbox.getBoundingSphere(sphere);
-          if (sphere.radius > 0) {
-            const fovRad = (Math.PI / 180) * 60; // must match PerspectiveCamera FOV at line ~773
-            autoFitDist = sphere.radius / Math.sin(fovRad / 2);
+
+        let autoFitDist = 3.0; // fallback if no better estimate
+        if (meta && pts.length > 0) {
+          // ml-sharp splats live in the source photo's camera frame: the
+          // original camera is at the origin looking along the Z axis. Center
+          // the wiggle on the optical axis at the subject's depth (median z of
+          // the points nearest the axis) — at zoom 1 this reproduces the source
+          // photo's framing exactly.
+          if (meta.fovDeg) {
+            camera.fov = meta.fovDeg;
+            camera.updateProjectionMatrix();
+          }
+          const byRadial = pts.slice().sort((a, b) => (a.x*a.x + a.y*a.y) - (b.x*b.x + b.y*b.y));
+          const inner = byRadial.slice(0, Math.max(8, byRadial.length >> 2));
+          const zs = inner.map(p => p.z).sort((a, b) => a - b);
+          const zMed = zs[zs.length >> 1];
+          center.set(0, 0, zMed);
+          autoFitDist = Math.abs(zMed) || 3.0;
+        } else if (pts.length > 0) {
+          // Generic PLY: robust bbox (outliers filtered at 3x RMS from centroid)
+          const centroid = new THREE.Vector3();
+          for (const p of pts) centroid.add(p);
+          centroid.divideScalar(pts.length);
+          let sumSq = 0;
+          for (const p of pts) sumSq += p.distanceToSquared(centroid);
+          const maxDist = Math.max(Math.sqrt(sumSq / pts.length) * 3, 0.01);
+          const bbox = new THREE.Box3();
+          let inlierSumY = 0, inlierCount = 0;
+          for (const p of pts) {
+            if (p.distanceTo(centroid) <= maxDist) {
+              bbox.expandByPoint(p);
+              inlierSumY += p.y;
+              inlierCount++;
+            }
+          }
+          if (!bbox.isEmpty()) {
+            bbox.getCenter(center);
+            // Mean Y of inliers beats bbox midpoint (skewed by sparse sky splats)
+            if (inlierCount > 0) center.y = inlierSumY / inlierCount;
+            const sphere = new THREE.Sphere();
+            bbox.getBoundingSphere(sphere);
+            if (sphere.radius > 0) {
+              const fovRad = (Math.PI / 180) * camera.fov;
+              autoFitDist = sphere.radius / Math.sin(fovRad / 2);
+            }
           }
         } else {
-          console.warn('SplatDepthSource: bbox unavailable, using fallback autoFitDist=3.0');
+          console.warn('SplatDepthSource: no splat samples, using fallback autoFitDist=3.0');
         }
         this._autoFitDist = autoFitDist;
         const distance = autoFitDist * PARAMS.splatZoom;
@@ -918,7 +1004,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         camera.lookAt(center.x, center.y, center.z);
         this.basePos = camera.position.clone();
         this._sceneCenter = center.clone();
-        console.log('[SplatDepthSource] camera auto-fit:', { center, autoFitDist, distance });
+        console.log('[SplatDepthSource] camera auto-fit: center=(' + center.x.toFixed(3) + ',' + center.y.toFixed(3) + ',' + center.z.toFixed(3) + ') autoFitDist=' + autoFitDist.toFixed(3) + ' distance=' + distance.toFixed(3) + ' camFov=' + camera.fov.toFixed(1));
       } catch (err) {
         if (this._glCanvas && this._glCanvas.parentElement) {
           this._glCanvas.parentElement.removeChild(this._glCanvas);
@@ -958,17 +1044,19 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     positionCamera(mode, angle, params) {
-      const cx = this._sceneCenter ? this._sceneCenter.x : 0;
-      const cy = this._sceneCenter ? this._sceneCenter.y : 0;
-      const cz = this._sceneCenter ? this._sceneCenter.z : 0;
-      // All 3D modes orbit the subject — the orbit/parallax/warp distinction
-      // is only meaningful for 2D depth-map pixel shifting.
+      // Orbit around the look-at target (scene center + user offset) so the
+      // swing stays centered on what the camera is pointed at.
       const sc = this._sceneCenter;
-      const dist = sc ? this.basePos.distanceTo(sc) : (this._autoFitDist || 3.0);
-      this.camera.position.x = cx + Math.sin(angle) * dist;
-      this.camera.position.y = this.basePos.y;
-      this.camera.position.z = cz + Math.cos(angle) * dist;
-      this.camera.lookAt(cx + PARAMS.splatOffsetX, cy + PARAMS.splatOffsetY, cz);
+      const tx = (sc ? sc.x : 0) + PARAMS.splatOffsetX;
+      const ty = (sc ? sc.y : 0) + PARAMS.splatOffsetY;
+      const tz = sc ? sc.z : 0;
+      const dist = this.basePos
+        ? Math.hypot(this.basePos.x - tx, this.basePos.y - ty, this.basePos.z - tz)
+        : (this._autoFitDist || 3.0);
+      this.camera.position.x = tx + Math.sin(angle) * dist;
+      this.camera.position.y = this.basePos ? this.basePos.y : ty;
+      this.camera.position.z = tz + Math.cos(angle) * dist;
+      this.camera.lookAt(tx, ty, tz);
     }
 
     startOscillation(mode, params) {
@@ -976,6 +1064,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (!this.viewer || !this.camera) return;
       this._lastMode = mode;
       this._lastParams = params;
+      // Smooth sine sweep for the live view; the generated output snaps
+      // between discrete views (see buildViewSequence).
       const startTime = performance.now();
       const tick = () => {
         const t = (performance.now() - startTime) / 1000;
@@ -988,21 +1078,23 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.oscId = requestAnimationFrame(tick);
     }
 
-    async captureFrame(frameIndex, totalFrames, mode, params, scaledSrc, scaledDepth) {
+    async captureFrame(t, mode, params, scaledSrc, scaledDepth) {
       if (!this.viewer || !this.camera || !this.renderer) return null;
 
-      const THREE = await import('three');
       const w = this.renderer.domElement.width;
       const h = this.renderer.domElement.height;
 
-      const rawAngle = (frameIndex / totalFrames) * 2 * Math.PI;
-      const angle = Math.sin(rawAngle) * (PARAMS.splatSwingAngle * Math.PI / 180);
+      const angle = t * (PARAMS.splatSwingAngle * Math.PI / 180);
       this.positionCamera(mode, angle, params);
 
-      // Settle splat sort worker before capture (6 rAF ticks)
+      // Settle splat sort worker before capture (6 ticks). rAF doesn't fire
+      // in hidden tabs, so race it against a timeout to avoid hanging.
       for (let i = 0; i < 6; i++) {
         this.viewer.update();
-        await new Promise(r => requestAnimationFrame(r));
+        await new Promise(r => {
+          const raf = requestAnimationFrame(() => { clearTimeout(tid); r(); });
+          const tid = setTimeout(() => { cancelAnimationFrame(raf); r(); }, 60);
+        });
       }
 
       // Render color to default framebuffer
@@ -1038,6 +1130,8 @@ sharp predict -i your_image.jpg -o output/</pre>
   document.getElementById('fileInput').addEventListener('change', (e) => {
     if (e.target.files[0]) loadSourceImage(e.target.files[0]);
   });
+  document.getElementById('splatDepthBtn').addEventListener('click', switchToDepthView);
+  document.getElementById('splat3DBtn').addEventListener('click', switchTo3DView);
   console.log('[wigglegram] event listeners registered');
 
   document.getElementById('depthSourceInput').addEventListener('change', (e) => {
@@ -1046,34 +1140,12 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     const depthSourceBtn = document.getElementById('depthSourceBtn');
     const depthPaneCanvas = document.getElementById('depthCanvas');
-    const isPly = file.name.toLowerCase().endsWith('.ply');
 
-    if (isPly) {
-      pendingSplatFile = file;
-      updateDepthPaneLabel('splat (loading...)');
-      depthSourceBtn.querySelector('.label-text').textContent = file.name;
-      depthSourceBtn.classList.add('loaded');
-      const splatSrc = new SplatDepthSource();
-      activeDepthSource = splatSrc;
-      setStatus('loading splat...', 'working');
-      splatSrc.load(file, depthPaneCanvas).then(() => {
-        updateDepthPaneLabel('splat (3D)');
-        document.getElementById('splatModeToggle').classList.add('visible');
-        document.getElementById('splatDepthBtn').classList.remove('active');
-        document.getElementById('splatDepthBtn').classList.add('disabled');
-        document.getElementById('splat3DBtn').classList.add('active');
-        document.getElementById('splat3DBtn').classList.remove('disabled');
-        if (window._depthFolder) window._depthFolder.hidden = true;
-        if (window._splatFolder) window._splatFolder.hidden = false;
-        updateMotionBinding(null, true);
-      }).catch(err => {
-        console.error('splat load error:', err);
-        setStatus('splat load failed — check console', 'error');
-      });
+    if (file.name.toLowerCase().endsWith('.ply')) {
+      loadSplatFile(file);
       return;
     }
 
-    pendingSplatFile = null;
     const img = new Image();
     img.onload = () => {
       const sw = srcImageData.width;
@@ -1084,10 +1156,11 @@ sharp predict -i your_image.jpg -o output/</pre>
       const ctx = tmp.getContext('2d');
       ctx.drawImage(img, 0, 0, sw, sh);
       const imageData = ctx.getImageData(0, 0, sw, sh);
+      disposeSplat();
       activeDepthSource = new ImageDepthSource(imageData);
       activeDepthSource.renderToPane(depthPaneCanvas);
-      if (window._depthFolder) window._depthFolder.hidden = false;
-      if (window._splatFolder) window._splatFolder.hidden = true;
+      if (depthFolder) depthFolder.hidden = false;
+      if (splatFolder) splatFolder.hidden = true;
       updateMotionBinding(PARAMS.mode, false);
       document.getElementById('splatModeToggle').classList.add('visible');
       document.getElementById('splatDepthBtn').classList.add('active');
@@ -1097,6 +1170,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       updateDepthPaneLabel('depth (custom: ' + file.name + ')');
       depthSourceBtn.querySelector('.label-text').textContent = file.name;
       depthSourceBtn.classList.add('loaded');
+      schedulePreviewRebuild();
     };
     img.src = URL.createObjectURL(file);
   });
@@ -1109,6 +1183,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   }
 
   function loadSourceImage(file) {
+    srcFile = file;
     const img = new Image();
     img.onload = () => {
       try {
@@ -1118,14 +1193,12 @@ sharp predict -i your_image.jpg -o output/</pre>
         const ctx = canvas.getContext('2d');
         ctx.drawImage(img, 0, 0);
         srcImageData = ctx.getImageData(0, 0, img.width, img.height);
+        disposeSplat();
         activeDepthSource = new LuminanceDepthSource(srcImageData);
-        if (window._splatFolder) window._splatFolder.hidden = true;
-        if (window._depthFolder) window._depthFolder.hidden = true;
+        if (splatFolder) splatFolder.hidden = true;
+        if (depthFolder) depthFolder.hidden = true;
         document.getElementById('splatModeToggle').classList.remove('visible');
         activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
-        pendingSplatFile = null;
-        customDepthData = null;
-        customDepthFilename = null;
         updateMotionBinding(PARAMS.mode, false);
         updateDepthPaneLabel('depth (luminance)');
 
@@ -1144,11 +1217,258 @@ sharp predict -i your_image.jpg -o output/</pre>
         document.getElementById('depthSourceInput').value = '';
 
         setStatus('ready  \u00b7  ' + img.width + '\u00d7' + img.height, '');
+
+        schedulePreviewRebuild();
+        estimateAIDepth(canvas);
       } catch(err) {
         console.error('loadSourceImage onload error:', err);
       }
     };
     img.src = URL.createObjectURL(file);
+  }
+
+  // \u2500\u2500\u2500 SPLAT FILE LOADING (shared by upload handler and companion) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // The [depth]/[3D] toggle keeps both sources alive: splatSource holds the
+  // loaded splat while a depth-map view is showing, savedDepthSource holds the
+  // depth-map source while the 3D view is showing.
+  let splatSource = null;
+  let savedDepthSource = null;
+  let savedDepthLabel = 'depth (luminance)';
+
+  function disposeSplat() {
+    if (activeDepthSource instanceof SplatDepthSource) activeDepthSource.dispose();
+    if (splatSource && splatSource !== activeDepthSource) {
+      try { splatSource.dispose(); } catch (e) {}
+    }
+    splatSource = null;
+    savedDepthSource = null;
+  }
+
+  function loadSplatFile(file) {
+    const depthSourceBtn = document.getElementById('depthSourceBtn');
+    const depthPaneCanvas = document.getElementById('depthCanvas');
+    // Remember the current depth-map source so [depth] can switch back to it
+    if (!(activeDepthSource instanceof SplatDepthSource)) {
+      savedDepthSource = activeDepthSource;
+      savedDepthLabel = document.getElementById('depthPaneLabel').textContent;
+    }
+    updateDepthPaneLabel('splat (loading...)');
+    depthSourceBtn.querySelector('.label-text').textContent = file.name;
+    depthSourceBtn.classList.add('loaded');
+    if (splatSource) { try { splatSource.dispose(); } catch (e) {} }
+    const splatSrc = new SplatDepthSource();
+    splatSource = splatSrc;
+    activeDepthSource = splatSrc;
+    hidePreview();
+    setStatus('loading splat...', 'working');
+    splatSrc.load(file, depthPaneCanvas).then(() => {
+      updateDepthPaneLabel('splat (3D)');
+      document.getElementById('splatModeToggle').classList.add('visible');
+      const depthBtn = document.getElementById('splatDepthBtn');
+      depthBtn.classList.remove('active');
+      depthBtn.classList.toggle('disabled', !savedDepthSource);
+      document.getElementById('splat3DBtn').classList.add('active');
+      document.getElementById('splat3DBtn').classList.remove('disabled');
+      if (depthFolder) depthFolder.hidden = true;
+      if (splatFolder) splatFolder.hidden = false;
+      updateMotionBinding(null, true);
+    }).catch(err => {
+      console.error('splat load error:', err);
+      setStatus('splat load failed \u2014 check console', 'error');
+    });
+  }
+
+  function switchToDepthView() {
+    if (!(activeDepthSource instanceof SplatDepthSource) || !savedDepthSource) return;
+    activeDepthSource.deactivate();
+    activeDepthSource = savedDepthSource;
+    activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+    if (depthFolder) depthFolder.hidden = !(activeDepthSource instanceof ImageDepthSource);
+    if (splatFolder) splatFolder.hidden = true;
+    updateMotionBinding(PARAMS.mode, false);
+    updateDepthPaneLabel(savedDepthLabel);
+    document.getElementById('splatDepthBtn').classList.add('active');
+    document.getElementById('splat3DBtn').classList.remove('active');
+    schedulePreviewRebuild();
+  }
+
+  function switchTo3DView() {
+    if (!splatSource || activeDepthSource === splatSource) return;
+    savedDepthSource = activeDepthSource;
+    savedDepthLabel = document.getElementById('depthPaneLabel').textContent;
+    activeDepthSource = splatSource;
+    splatSource.reactivate();
+    hidePreview();
+    if (depthFolder) depthFolder.hidden = true;
+    if (splatFolder) splatFolder.hidden = false;
+    updateMotionBinding(null, true);
+    updateDepthPaneLabel('splat (3D)');
+    document.getElementById('splatDepthBtn').classList.remove('active');
+    document.getElementById('splat3DBtn').classList.add('active');
+  }
+
+  // \u2500\u2500\u2500 ML-SHARP COMPANION (local splat generation server) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Run `python wigglegram-companion.py` alongside the app; when detected, a
+  // "Generate Splat" button appears that turns the source photo into a .ply.
+  const COMPANION_URL = 'http://127.0.0.1:8765';
+  let companionBusy = false;
+  let companionAvailable = false;
+
+  (async function detectCompanion() {
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 2000);
+      const resp = await fetch(COMPANION_URL + '/health', { signal: ctrl.signal });
+      clearTimeout(timer);
+      const info = await resp.json();
+      if (info.ok) {
+        companionAvailable = true;
+        document.getElementById('companionBtn').style.display = '';
+        console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats enabled');
+      }
+    } catch (e) {
+      // companion not running \u2014 button stays hidden, depth uses in-browser model
+    }
+  })();
+
+  // Companion DA3 depth: returns ImageData at source resolution, or null
+  async function companionDepth(srcCanvas) {
+    const blob = await new Promise(r => srcCanvas.toBlob(r, 'image/png'));
+    const resp = await fetch(COMPANION_URL + '/depth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'image/png' },
+      body: blob,
+    });
+    if (!resp.ok) throw new Error('companion depth error ' + resp.status);
+    const bmp = await createImageBitmap(await resp.blob());
+    const c = document.createElement('canvas');
+    c.width = srcCanvas.width;
+    c.height = srcCanvas.height;
+    const ctx = c.getContext('2d');
+    ctx.drawImage(bmp, 0, 0, c.width, c.height);
+    return ctx.getImageData(0, 0, c.width, c.height);
+  }
+
+  window.generateSplatViaCompanion = async function() {
+    if (!srcFile || companionBusy) {
+      if (!srcFile) setStatus('load a source image first', 'error');
+      return;
+    }
+    companionBusy = true;
+    const btn = document.getElementById('companionBtn');
+    btn.disabled = true;
+    btn.querySelector('.label-text').textContent = 'Generating splat... (~1 min)';
+    setStatus('generating splat via ml-sharp...', 'working');
+    try {
+      const resp = await fetch(COMPANION_URL + '/predict', {
+        method: 'POST',
+        headers: { 'Content-Type': srcFile.type || 'image/jpeg' },
+        body: srcFile,
+      });
+      if (!resp.ok) {
+        let msg = 'companion error ' + resp.status;
+        try { msg = (await resp.json()).error || msg; } catch (e2) {}
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      const baseName = srcFile.name.replace(/\.[^.]+$/, '');
+      loadSplatFile(new File([blob], baseName + '.ply'));
+    } catch (err) {
+      console.error('companion splat generation failed:', err);
+      setStatus('splat generation failed: ' + err.message, 'error');
+    } finally {
+      companionBusy = false;
+      btn.disabled = false;
+      btn.querySelector('.label-text').textContent = 'Generate Splat (ml-sharp)';
+    }
+  };
+
+  // \u2500\u2500\u2500 AI DEPTH ESTIMATION (Depth Anything V2 Small via transformers.js) \u2500\u2500\u2500\u2500\u2500
+  let depthEstimator = null;       // lazily created pipeline, reused across images
+  let depthEstimatorFailed = false; // don't retry after a hard failure
+  let depthRequestId = 0;          // stale-result guard
+
+  async function getDepthEstimator() {
+    if (depthEstimator) return depthEstimator;
+    const { pipeline } = await import('https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.0');
+    const hasWebGPU = !!navigator.gpu;
+    depthEstimator = await pipeline('depth-estimation', 'onnx-community/depth-anything-v2-small', {
+      device: hasWebGPU ? 'webgpu' : 'wasm',
+      dtype: hasWebGPU ? 'fp16' : 'q8',
+      progress_callback: (p) => {
+        if (p.status === 'progress' && p.file && p.file.endsWith('.onnx')) {
+          setStatus('downloading depth model  ' + Math.round(p.progress) + '%', 'working');
+        }
+      },
+    });
+    return depthEstimator;
+  }
+
+  async function estimateAIDepth(srcCanvas) {
+    if (depthEstimatorFailed) return;
+    const requestId = ++depthRequestId;
+    // Remember which source we're estimating for; only apply if still current
+    const forSource = activeDepthSource;
+
+    // Prefer companion DA3 depth (much better quality than the in-browser model)
+    if (companionAvailable) {
+      try {
+        setStatus('estimating depth (DA3)...', 'working');
+        const depthImg = await companionDepth(srcCanvas);
+        if (requestId !== depthRequestId || activeDepthSource !== forSource) return;
+        applyEstimatedDepth(depthImg, 'depth (DA3)');
+        return;
+      } catch (err) {
+        console.warn('companion depth failed, falling back to in-browser model:', err);
+        if (requestId !== depthRequestId || activeDepthSource !== forSource) return;
+      }
+    }
+
+    try {
+      const estimator = await getDepthEstimator();
+      if (requestId !== depthRequestId) return;
+
+      setStatus('estimating depth (AI)...', 'working');
+      const blob = await new Promise(r => srcCanvas.toBlob(r, 'image/png'));
+      const blobUrl = URL.createObjectURL(blob);
+      let result;
+      try {
+        result = await estimator(blobUrl);
+      } finally {
+        URL.revokeObjectURL(blobUrl);
+      }
+
+      // Discard if the user changed the image or picked a custom depth/splat meanwhile
+      if (requestId !== depthRequestId || activeDepthSource !== forSource) return;
+
+      // RawImage (single channel, bright = near) \u2192 RGBA ImageData
+      const d = result.depth;
+      const depthImg = new ImageData(d.width, d.height);
+      for (let i = 0; i < d.width * d.height; i++) {
+        const v = d.data[i];
+        depthImg.data[i * 4] = v;
+        depthImg.data[i * 4 + 1] = v;
+        depthImg.data[i * 4 + 2] = v;
+        depthImg.data[i * 4 + 3] = 255;
+      }
+      applyEstimatedDepth(depthImg, 'depth (AI)');
+    } catch (err) {
+      console.error('AI depth estimation failed:', err);
+      depthEstimatorFailed = true;
+      if (requestId === depthRequestId && activeDepthSource === forSource) {
+        setStatus('AI depth unavailable \u2014 using luminance', '');
+      }
+    }
+  }
+
+  function applyEstimatedDepth(depthImg, label) {
+    activeDepthSource = new ImageDepthSource(depthImg);
+    activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+    if (depthFolder) depthFolder.hidden = false;
+    updateMotionBinding(PARAMS.mode, false);
+    updateDepthPaneLabel(label);
+    setStatus(label.replace('depth (', '').replace(')', '') + ' depth ready', 'done');
+    schedulePreviewRebuild();
   }
 
   function updateDepthPaneLabel(text) {
@@ -1162,13 +1482,10 @@ sharp predict -i your_image.jpg -o output/</pre>
     e.preventDefault();
     if (!srcImageData) return;
 
-    if (activeDepthSource instanceof SplatDepthSource) {
-      activeDepthSource.dispose();
-    }
-    if (window._splatFolder) window._splatFolder.hidden = true;
-    if (window._depthFolder) window._depthFolder.hidden = true;
+    disposeSplat();
+    if (splatFolder) splatFolder.hidden = true;
+    if (depthFolder) depthFolder.hidden = true;
     document.getElementById('splatModeToggle').classList.remove('visible');
-    pendingSplatFile = null;
     activeDepthSource = new LuminanceDepthSource(srcImageData);
     activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
     updateDepthPaneLabel('depth (luminance)');
@@ -1177,6 +1494,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     depthSourceBtn.querySelector('.label-text').textContent = 'Upload Depth Source (optional)';
     depthSourceBtn.classList.remove('loaded');
     document.getElementById('depthSourceInput').value = '';
+    schedulePreviewRebuild();
   };
 
   // ─── CIRCULAR DISC BOKEH ───────────────────────────────────────────────────
@@ -1298,11 +1616,12 @@ sharp predict -i your_image.jpg -o output/</pre>
   }
 
   // ─── CHROMATIC ABERRATION ──────────────────────────────────────────────────
-  function applyChromaticAberration(frameData, k, angle, width, height) {
+  // t is the normalized viewpoint offset in [-1, 1]
+  function applyChromaticAberration(frameData, k, t, width, height) {
     if (k <= 0) return frameData;
     const out = new Uint8ClampedArray(frameData);
-    const rShift = k * Math.sin(angle);
-    const bShift = -k * Math.sin(angle);
+    const rShift = k * t;
+    const bShift = -k * t;
 
     for (let y = 0; y < height; y++) {
       for (let x = 0; x < width; x++) {
@@ -1435,8 +1754,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   function getDepthMap(imageData) {
     const invert = PARAMS.invertDepth;
     const smoothR = Math.min(PARAMS.bokehCoc, 4);
-    const src = customDepthData || imageData;
-    let d = computeLuminanceDepth(src, invert);
+    let d = computeLuminanceDepth(imageData, invert);
     d = boxBlur(d, imageData.width, imageData.height, smoothR);
     d = boxBlur(d, imageData.width, imageData.height, smoothR);
     return d;
@@ -1444,60 +1762,89 @@ sharp predict -i your_image.jpg -o output/</pre>
   // ─── FRAME GENERATION ──────────────────────────────────────────────────────
   const NUM_DEPTH_PASSES = 32;
 
+  // Counting-sort pixel indices into depth buckets so painter's-algorithm
+  // splatting scans the image once instead of once per depth pass.
+  // Stable sort keeps row-major order within each bucket.
+  function bucketPixelsByDepth(depth) {
+    const n = depth.length;
+    const offsets = new Uint32Array(NUM_DEPTH_PASSES + 1);
+    const bucket = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      let b = (depth[i] * NUM_DEPTH_PASSES) | 0;
+      if (b > NUM_DEPTH_PASSES - 1) b = NUM_DEPTH_PASSES - 1;
+      bucket[i] = b;
+      offsets[b + 1]++;
+    }
+    for (let b = 0; b < NUM_DEPTH_PASSES; b++) offsets[b + 1] += offsets[b];
+    const indices = new Uint32Array(n);
+    const cursor = offsets.slice(0, NUM_DEPTH_PASSES);
+    for (let i = 0; i < n; i++) indices[cursor[bucket[i]]++] = i;
+    return { indices, offsets };
+  }
+
+  // Fill disocclusion holes by extending the background side. Holes are
+  // horizontal runs of pixels no source pixel landed on; what's revealed there
+  // physically belongs to the farther surface, so each run is filled from the
+  // boundary pixel whose SOURCE depth is farther (smaller value; 1 = near).
+  // Filling whole runs handles arbitrarily wide holes.
+  function fillDisocclusions(out, written, srcIdxMap, depth, width, height) {
+    for (let y = 0; y < height; y++) {
+      const row = y * width;
+      let x = 0;
+      while (x < width) {
+        if (written[row + x]) { x++; continue; }
+        let end = x;
+        while (end < width && !written[row + end]) end++;
+        const li = x > 0 ? row + x - 1 : -1;
+        const ri = end < width ? row + end : -1;
+        let src;
+        if (li >= 0 && ri >= 0) {
+          src = depth[srcIdxMap[li]] <= depth[srcIdxMap[ri]] ? li : ri;
+        } else {
+          src = li >= 0 ? li : ri;
+        }
+        if (src >= 0) {
+          const si = src * 4;
+          for (let xi = x; xi < end; xi++) {
+            const di = (row + xi) * 4;
+            out[di]     = out[si];
+            out[di + 1] = out[si + 1];
+            out[di + 2] = out[si + 2];
+            out[di + 3] = 255;
+          }
+        }
+        x = end;
+      }
+    }
+  }
+
   function generateFrameParallax(srcData, depth, xOffset, width, height) {
     const out = new Uint8ClampedArray(srcData.buffer.slice(0, width * height * 4));
     const written = new Uint8Array(width * height);
+    const srcIdxMap = new Uint32Array(width * height);
+    const { indices, offsets } = bucketPixelsByDepth(depth);
 
     for (let pass = 0; pass < NUM_DEPTH_PASSES; pass++) {
-      const minD = pass / NUM_DEPTH_PASSES;
-      const maxD = (pass + 1) / NUM_DEPTH_PASSES;
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const idx = y * width + x;
-          const d = depth[idx];
-          if (d < minD || d >= maxD) continue;
-          const dstX = Math.round(x + (d - 0.5) * xOffset);
-          if (dstX < 0 || dstX >= width) continue;
-          const si = idx * 4;
-          const di = (y * width + dstX) * 4;
-          out[di]     = srcData[si];
-          out[di + 1] = srcData[si + 1];
-          out[di + 2] = srcData[si + 2];
-          out[di + 3] = 255;
-          written[y * width + dstX] = 1;
-        }
+      for (let k = offsets[pass]; k < offsets[pass + 1]; k++) {
+        const idx = indices[k];
+        const x = idx % width;
+        const y = (idx / width) | 0;
+        const d = depth[idx];
+        const dstX = Math.round(x + (d - 0.5) * xOffset);
+        if (dstX < 0 || dstX >= width) continue;
+        const si = idx * 4;
+        const dst = y * width + dstX;
+        const di = dst * 4;
+        out[di]     = srcData[si];
+        out[di + 1] = srcData[si + 1];
+        out[di + 2] = srcData[si + 2];
+        out[di + 3] = 255;
+        written[dst] = 1;
+        srcIdxMap[dst] = idx;
       }
     }
 
-    // Edge-aware occlusion fill
-    for (let y = 0; y < height; y++) {
-      for (let x = 0; x < width; x++) {
-        const i = y * width + x;
-        if (written[i]) continue;
-        const expectedDepth = depth[i];
-        let leftSrc = -1, rightSrc = -1;
-        for (let dx = 1; dx <= 8 && leftSrc < 0; dx++) {
-          if (x - dx >= 0 && written[i - dx]) leftSrc = i - dx;
-        }
-        for (let dx = 1; dx <= 8 && rightSrc < 0; dx++) {
-          if (x + dx < width && written[i + dx]) rightSrc = i + dx;
-        }
-        if (leftSrc < 0 && rightSrc < 0) continue;
-        let src;
-        if (leftSrc < 0) src = rightSrc;
-        else if (rightSrc < 0) src = leftSrc;
-        else {
-          const ld = Math.abs(depth[leftSrc] - expectedDepth);
-          const rd = Math.abs(depth[rightSrc] - expectedDepth);
-          src = ld <= rd ? leftSrc : rightSrc;
-        }
-        out[i * 4]     = out[src * 4];
-        out[i * 4 + 1] = out[src * 4 + 1];
-        out[i * 4 + 2] = out[src * 4 + 2];
-        out[i * 4 + 3] = 255;
-      }
-    }
-
+    fillDisocclusions(out, written, srcIdxMap, depth, width, height);
     return out;
   }
 
@@ -1528,64 +1875,36 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     const out = new Uint8ClampedArray(srcData.buffer.slice(0, width * height * 4));
     const written = new Uint8Array(width * height);
+    const srcIdxMap = new Uint32Array(width * height);
+    const { indices, offsets } = bucketPixelsByDepth(depth);
 
     for (let pass = NUM_DEPTH_PASSES - 1; pass >= 0; pass--) {
-      const minD = pass / NUM_DEPTH_PASSES;
-      const maxD = (pass + 1) / NUM_DEPTH_PASSES;
+      for (let k = offsets[pass]; k < offsets[pass + 1]; k++) {
+        const idx = indices[k];
+        const x = idx % width;
+        const y = (idx / width) | 0;
+        const dn = depth[idx];
 
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const idx = y * width + x;
-          const dn = depth[idx];
-          if (dn < minD || dn >= maxD) continue;
+        const Z = zFar - dn * (zFar - zNear);
+        const shift = tx * fx * (1 / Zf - 1 / Z);
+        const dstX = Math.round(x + shift);
 
-          const Z = zFar - dn * (zFar - zNear);
-          const shift = tx * fx * (1 / Zf - 1 / Z);
-          const dstX = Math.round(x + shift);
+        if (dstX < 0 || dstX >= width) continue;
 
-          if (dstX < 0 || dstX >= width) continue;
-
-          const si = idx * 4;
-          const di = (y * width + dstX) * 4;
-          out[di]     = srcData[si];
-          out[di + 1] = srcData[si + 1];
-          out[di + 2] = srcData[si + 2];
-          out[di + 3] = 255;
-          written[y * width + dstX] = 1;
-        }
+        const si = idx * 4;
+        const dst = y * width + dstX;
+        const di = dst * 4;
+        out[di]     = srcData[si];
+        out[di + 1] = srcData[si + 1];
+        out[di + 2] = srcData[si + 2];
+        out[di + 3] = 255;
+        written[dst] = 1;
+        srcIdxMap[dst] = idx;
       }
     }
 
-    // Hole fill: 3-pass 4-neighbor dilation
-    for (let p = 0; p < 3; p++) {
-      const snap = new Uint8Array(written);
-      for (let y = 0; y < height; y++) {
-        for (let x = 0; x < width; x++) {
-          const i = y * width + x;
-          if (snap[i]) continue;
-          let src = -1;
-          if (x > 0              && snap[i - 1])     src = i - 1;
-          else if (x < width - 1  && snap[i + 1])     src = i + 1;
-          else if (y > 0          && snap[i - width])  src = i - width;
-          else if (y < height - 1 && snap[i + width])  src = i + width;
-          if (src < 0) continue;
-          out[i * 4]     = out[src * 4];
-          out[i * 4 + 1] = out[src * 4 + 1];
-          out[i * 4 + 2] = out[src * 4 + 2];
-          out[i * 4 + 3] = 255;
-          written[i] = 1;
-        }
-      }
-    }
-
+    fillDisocclusions(out, written, srcIdxMap, depth, width, height);
     return out;
-  }
-
-  function generateFrame(srcData, depth, offset, width, height) {
-    const mode = PARAMS.mode;
-    if (mode === 'orbit') return generateFrameOrbit(srcData, depth, offset, width, height);
-    if (mode === 'warp')     return generateFrameWarp(srcData, depth, offset, width, height);
-    return generateFrameParallax(srcData, depth, offset, width, height);
   }
 
   // ─── STATUS ────────────────────────────────────────────────────────────────
@@ -1608,24 +1927,37 @@ sharp predict -i your_image.jpg -o output/</pre>
   }
 
   // ─── GIF PREVIEW / DOWNLOAD ────────────────────────────────────────────────
+  let outputExtension = 'gif';
+
   window.downloadGif = function() {
     if (!gifBlobUrl) return;
     const a = document.createElement('a');
     a.href = gifBlobUrl;
-    a.download = 'wigglegram.gif';
+    a.download = 'wigglegram.' + outputExtension;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
   };
 
-  function showGifPreview(blob) {
+  function showOutputPreview(blob, extension) {
     // Revoke old blob URL
     if (gifBlobUrl) URL.revokeObjectURL(gifBlobUrl);
     gifBlobUrl = URL.createObjectURL(blob);
+    outputExtension = extension;
 
     const panel = document.getElementById('gifPreviewPanel');
     const img = document.getElementById('gifPreview');
-    img.src = gifBlobUrl;
+    const video = document.getElementById('videoPreview');
+    const isVideo = extension !== 'gif';
+    img.style.display = isVideo ? 'none' : '';
+    video.style.display = isVideo ? '' : 'none';
+    if (isVideo) {
+      video.src = gifBlobUrl;
+      img.removeAttribute('src');
+    } else {
+      img.src = gifBlobUrl;
+      video.removeAttribute('src');
+    }
     panel.classList.add('visible');
     document.getElementById('generateBtn').disabled = false;
   }
@@ -1634,6 +1966,118 @@ sharp predict -i your_image.jpg -o output/</pre>
   window.addEventListener('beforeunload', () => {
     if (gifBlobUrl) URL.revokeObjectURL(gifBlobUrl);
   });
+
+  // ─── SCALED INPUT PREP (shared by pipeline and live preview) ───────────────
+  // Downscales the source to targetWidth and computes the matching depth map
+  // and depth-blurred source. cocScale is in pixels at the target resolution.
+  function prepareScaledInputs(targetWidth, cocScale) {
+    let width = srcImageData.width;
+    let height = srcImageData.height;
+    let scaledSrc = srcImageData;
+
+    if (width > targetWidth) {
+      const scale = targetWidth / width;
+      width = Math.round(srcImageData.width * scale);
+      height = Math.round(srcImageData.height * scale);
+
+      const tmp = document.createElement('canvas');
+      tmp.width = width; tmp.height = height;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(document.getElementById('srcCanvas'), 0, 0, width, height);
+      scaledSrc = ctx.getImageData(0, 0, width, height);
+    }
+
+    // Compute depth at scaled resolution from activeDepthSource
+    const invert = PARAMS.invertDepth;
+    let depth;
+    if (activeDepthSource instanceof ImageDepthSource) {
+      const rawCanvas = document.createElement('canvas');
+      rawCanvas.width = activeDepthSource.depthImageData.width;
+      rawCanvas.height = activeDepthSource.depthImageData.height;
+      rawCanvas.getContext('2d').putImageData(activeDepthSource.depthImageData, 0, 0);
+      const tmp = document.createElement('canvas');
+      tmp.width = width; tmp.height = height;
+      const ctx = tmp.getContext('2d');
+      ctx.drawImage(rawCanvas, 0, 0, width, height);
+      const scaledDepthData = ctx.getImageData(0, 0, width, height);
+      depth = computeLuminanceDepth(scaledDepthData, invert);
+    } else {
+      // LuminanceDepthSource: compute from scaled source
+      depth = computeLuminanceDepth(scaledSrc, invert);
+    }
+    const depthSmoothR = Math.min(cocScale, 4);
+    depth = boxBlur(depth, width, height, depthSmoothR);
+    depth = boxBlur(depth, width, height, depthSmoothR);
+
+    // Pre-blur source proportional to depth (background blurs, foreground stays sharp)
+    const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
+    return { width, height, depth, blurredSrc: { data: blurredSrcData, width, height } };
+  }
+
+  // ─── LIVE PREVIEW (2D depth-map modes only) ────────────────────────────────
+  const PREVIEW_WIDTH = 420;
+  let previewGeneration = 0;
+  let previewTimer = null;
+  let previewDebounce = null;
+
+  function stopPreviewLoop() {
+    if (previewTimer) { clearInterval(previewTimer); previewTimer = null; }
+  }
+
+  function hidePreview() {
+    previewGeneration++;
+    stopPreviewLoop();
+    document.getElementById('livePreviewPanel').classList.remove('visible');
+  }
+
+  function startPreviewLoop(frames, width, height) {
+    stopPreviewLoop();
+    const canvas = document.getElementById('livePreviewCanvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    let i = 0;
+    ctx.putImageData(frames[0], 0, 0);
+    previewTimer = setInterval(() => {
+      i = (i + 1) % frames.length;
+      ctx.putImageData(frames[i], 0, 0);
+    }, PARAMS.frameDelay);
+  }
+
+  async function rebuildPreview() {
+    if (!srcImageData || activeDepthSource instanceof SplatDepthSource) {
+      hidePreview();
+      return;
+    }
+    const gen = ++previewGeneration;
+    const forSource = activeDepthSource;
+
+    // Effects that are specified in output pixels get scaled to preview size
+    const outScale = Math.min(1, PREVIEW_WIDTH / Math.min(srcImageData.width, PARAMS.outputWidth));
+    const cocScale = PARAMS.bokehCoc * outScale;
+    const wrapRadius = PARAMS.lightWrap * outScale;
+
+    const { width, height, depth, blurredSrc } = prepareScaledInputs(PREVIEW_WIDTH, cocScale);
+    const { positions, seq } = buildViewSequence();
+    const viewFrames = [];
+    for (const t of positions) {
+      if (gen !== previewGeneration || activeDepthSource !== forSource) return;
+      const { colorData } = await captureDepthMapFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
+      let px = applyLightWrap(colorData, depth, wrapRadius, width, height);
+      px = circularDiscBokeh(px, depth, PARAMS.focusDist, cocScale, width, height);
+      px = applyChromaticAberration(px, PARAMS.chromaticAberr, t, width, height);
+      viewFrames.push(new ImageData(px, width, height));
+      await new Promise(r => setTimeout(r, 0));
+    }
+    if (gen !== previewGeneration || activeDepthSource !== forSource) return;
+    startPreviewLoop(seq.map(v => viewFrames[v]), width, height);
+    document.getElementById('livePreviewPanel').classList.add('visible');
+  }
+
+  function schedulePreviewRebuild() {
+    if (previewDebounce) clearTimeout(previewDebounce);
+    previewDebounce = setTimeout(() => { rebuildPreview(); }, 250);
+  }
 
   // ─── PIPELINE ──────────────────────────────────────────────────────────────
   async function runPipeline(targetWidth) {
@@ -1645,7 +2089,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     const generateBtn = document.getElementById('generateBtn');
     generateBtn.disabled = true;
 
-    const numFrames = PARAMS.frames;
+    const { positions, seq } = buildViewSequence();
+    const numFrames = seq.length;
     const frameDelay = PARAMS.frameDelay;
     const cocScale = PARAMS.bokehCoc;
     const focusDist = PARAMS.focusDist;
@@ -1662,52 +2107,11 @@ sharp predict -i your_image.jpg -o output/</pre>
       generateBtn.disabled = false;
       return;
     }
-    let width, height, scaledSrc, depth, blurredSrc;
+    let width, height, depth, blurredSrc;
     let origW = 800, origH = 480;
 
     if (!isSplat3D) {
-      // Scale source image
-      width = srcImageData.width;
-      height = srcImageData.height;
-      scaledSrc = srcImageData;
-
-      if (width > targetWidth) {
-        const scale = targetWidth / width;
-        width = Math.round(srcImageData.width * scale);
-        height = Math.round(srcImageData.height * scale);
-
-        const tmp = document.createElement('canvas');
-        tmp.width = width; tmp.height = height;
-        const ctx = tmp.getContext('2d');
-        ctx.drawImage(document.getElementById('srcCanvas'), 0, 0, width, height);
-        scaledSrc = ctx.getImageData(0, 0, width, height);
-      }
-
-      // Compute depth at scaled resolution from activeDepthSource
-      const invert = PARAMS.invertDepth;
-
-      if (activeDepthSource instanceof ImageDepthSource) {
-        const rawCanvas = document.createElement('canvas');
-        rawCanvas.width = activeDepthSource.depthImageData.width;
-        rawCanvas.height = activeDepthSource.depthImageData.height;
-        rawCanvas.getContext('2d').putImageData(activeDepthSource.depthImageData, 0, 0);
-        const tmp = document.createElement('canvas');
-        tmp.width = width; tmp.height = height;
-        const ctx = tmp.getContext('2d');
-        ctx.drawImage(rawCanvas, 0, 0, width, height);
-        const scaledDepthData = ctx.getImageData(0, 0, width, height);
-        depth = computeLuminanceDepth(scaledDepthData, invert);
-      } else {
-        // LuminanceDepthSource: compute from scaled source
-        depth = computeLuminanceDepth(scaledSrc, invert);
-      }
-      const depthSmoothR = Math.min(cocScale, 4);
-      depth = boxBlur(depth, width, height, depthSmoothR);
-      depth = boxBlur(depth, width, height, depthSmoothR);
-
-      // Pre-blur source proportional to depth (background blurs, foreground stays sharp)
-      const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
-      blurredSrc = { data: blurredSrcData, width, height };
+      ({ width, height, depth, blurredSrc } = prepareScaledInputs(targetWidth, cocScale));
     } else {
       // For splat: resize to target width for capture, then restore after encoding
       origW = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.width : 800;
@@ -1716,63 +2120,110 @@ sharp predict -i your_image.jpg -o output/</pre>
       width = targetWidth;
       height = Math.round(origH * scale);
       activeDepthSource.renderer.setSize(width, height, false);
-      scaledSrc = null;
       depth = null;
       blurredSrc = null;
     }
 
-    setStatus('loading gif encoder...', 'working');
+    const isVideo = PARAMS.format === 'video';
+    let gif = null;
 
-    // Fetch gif.js worker as blob
-    let workerUrl;
-    try {
-      const resp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js');
-      const code = await resp.text();
-      workerUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
-    } catch(e) {
-      setStatus('could not load gif encoder: ' + e.message, 'error');
-      generateBtn.disabled = false;
-      return;
+    if (!isVideo) {
+      setStatus('loading gif encoder...', 'working');
+
+      // Fetch gif.js worker as blob (cached across runs)
+      if (!gifWorkerUrl) {
+        try {
+          const resp = await fetch('https://cdnjs.cloudflare.com/ajax/libs/gif.js/0.2.0/gif.worker.js');
+          const code = await resp.text();
+          gifWorkerUrl = URL.createObjectURL(new Blob([code], { type: 'application/javascript' }));
+        } catch(e) {
+          setStatus('could not load gif encoder: ' + e.message, 'error');
+          generateBtn.disabled = false;
+          return;
+        }
+      }
+
+      gif = new GIF({
+        workers: 2,
+        quality: 8,
+        workerScript: gifWorkerUrl,
+        width: width,
+        height: height,
+        repeat: 0
+      });
     }
 
     // Pause splat oscillation during capture
     if (isSplat3D) activeDepthSource.stopOscillation();
 
-    const gif = new GIF({
-      workers: 2,
-      quality: 8,
-      workerScript: workerUrl,
-      width: width,
-      height: height,
-      repeat: 0
-    });
-
     const frameCanvas = document.createElement('canvas');
     frameCanvas.width = width;
     frameCanvas.height = height;
     const fCtx = frameCanvas.getContext('2d');
+    const videoFrames = [];
 
-    for (let i = 0; i < numFrames; i++) {
-      const angle = (i / numFrames) * 2 * Math.PI;
-
+    // Capture each distinct viewpoint once...
+    const viewImages = [];
+    for (let v = 0; v < positions.length; v++) {
+      const t = positions[v];
       const { colorData, depthArray, width: fw, height: fh } =
-        await activeDepthSource.captureFrame(i, numFrames, PARAMS.mode, PARAMS, blurredSrc, depth);
+        await activeDepthSource.captureFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
 
       let framePixels = applyLightWrap(colorData, depthArray, wrapRadius, fw, fh);
       framePixels = circularDiscBokeh(framePixels, depthArray, focusDist, cocScale, fw, fh);
-      framePixels = applyChromaticAberration(framePixels, caStrength, angle, fw, fh);
+      framePixels = applyChromaticAberration(framePixels, caStrength, t, fw, fh);
 
       const imgData = fCtx.createImageData(fw, fh);
       imgData.data.set(framePixels);
-      fCtx.putImageData(imgData, 0, 0);
+      viewImages.push(imgData);
 
-      gif.addFrame(frameCanvas, { delay: frameDelay, copy: true });
-
-      const pct = Math.round(((i + 1) / numFrames) * 50);
-      setStatus(`building frames  ${i + 1}/${numFrames}`, 'working');
+      const pct = Math.round(((v + 1) / positions.length) * 50);
+      setStatus(`building views  ${v + 1}/${positions.length}`, 'working');
       setProgress(pct);
 
       await new Promise(r => setTimeout(r, 0));
+    }
+
+    // ...then assemble the ping-pong frame sequence from them
+    for (const v of seq) {
+      if (isVideo) {
+        videoFrames.push(viewImages[v]);
+      } else {
+        fCtx.putImageData(viewImages[v], 0, 0);
+        gif.addFrame(frameCanvas, { delay: frameDelay, copy: true });
+      }
+    }
+
+    const finishRun = (blob, extension) => {
+      showOutputPreview(blob, extension);
+
+      if (isSplat3D && activeDepthSource && activeDepthSource.renderer && (width !== origW || height !== origH)) {
+        activeDepthSource.renderer.setSize(origW, origH, false);
+      }
+
+      // Resume splat oscillation after capture
+      if (isSplat3D && activeDepthSource instanceof SplatDepthSource) {
+        activeDepthSource.startOscillation(PARAMS.mode, PARAMS);
+      }
+
+      const kb = Math.round(blob.size / 1024);
+      setStatus(`done  \u00b7  ${width}\u00d7${height}  \u00b7  ${numFrames}f  \u00b7  ${kb}kb  \u00b7  .${extension}`, 'done');
+      setProgress(-1);
+      // generateBtn is enabled by showOutputPreview()
+    };
+
+    if (isVideo) {
+      try {
+        setStatus('recording video...', 'working');
+        const { blob, extension } = await encodeVideo(videoFrames, width, height, frameDelay);
+        finishRun(blob, extension);
+      } catch (err) {
+        console.error('video encoding error:', err);
+        setStatus('video encoding failed \u2014 check console', 'error');
+        setProgress(-1);
+        generateBtn.disabled = false;
+      }
+      return;
     }
 
     gif.on('progress', p => {
@@ -1787,27 +2238,55 @@ sharp predict -i your_image.jpg -o output/</pre>
       generateBtn.disabled = false;
     });
 
-    gif.on('finished', blob => {
-      URL.revokeObjectURL(workerUrl);
-      showGifPreview(blob);
+    gif.on('finished', blob => finishRun(blob, 'gif'));
 
-      if (isSplat3D && activeDepthSource && activeDepthSource.renderer && (width !== origW || height !== origH)) {
-        activeDepthSource.renderer.setSize(origW, origH, false);
-      }
+    gif.render();
+  }
 
-      // Resume splat oscillation after capture
-      if (isSplat3D && activeDepthSource instanceof SplatDepthSource) {
-        activeDepthSource.startOscillation(PARAMS.mode, PARAMS);
-      }
+  // \u2500\u2500\u2500 VIDEO ENCODING (MediaRecorder over a canvas stream) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  async function encodeVideo(frames, width, height, frameDelay) {
+    const candidates = [
+      { mime: 'video/mp4;codecs=avc1.42E01E', extension: 'mp4' },
+      { mime: 'video/webm;codecs=vp9', extension: 'webm' },
+      { mime: 'video/webm', extension: 'webm' },
+    ];
+    const choice = candidates.find(c => window.MediaRecorder && MediaRecorder.isTypeSupported(c.mime));
+    if (!choice) throw new Error('MediaRecorder video encoding not supported in this browser');
 
-      const kb = Math.round(blob.size / 1024);
-      setStatus(`done  \u00b7  ${width}\u00d7${height}  \u00b7  ${numFrames}f  \u00b7  ${kb}kb`, 'done');
-      setProgress(-1);
-      // generateBtn is enabled by showGifPreview()
+    const canvas = document.createElement('canvas');
+    canvas.width = width;
+    canvas.height = height;
+    const ctx = canvas.getContext('2d');
+    ctx.putImageData(frames[0], 0, 0);
+
+    const stream = canvas.captureStream(0);
+    const track = stream.getVideoTracks()[0];
+    const recorder = new MediaRecorder(stream, { mimeType: choice.mime, videoBitsPerSecond: 8000000 });
+    const chunks = [];
+    recorder.ondataavailable = e => { if (e.data.size) chunks.push(e.data); };
+    const stopped = new Promise((resolve, reject) => {
+      recorder.onstop = resolve;
+      recorder.onerror = e => reject(e.error || new Error('recorder error'));
     });
 
-    // Restore renderer size after capture (done inside finished callback)
-    gif.render();
+    // Recording happens in real time: replay the loop enough times for a ~3s+ clip
+    const loopMs = frames.length * frameDelay;
+    const loops = Math.max(3, Math.ceil(3000 / loopMs));
+    const totalFrames = loops * frames.length;
+
+    recorder.start();
+    for (let i = 0; i < totalFrames; i++) {
+      ctx.putImageData(frames[i % frames.length], 0, 0);
+      if (track.requestFrame) track.requestFrame();
+      else if (stream.requestFrame) stream.requestFrame();
+      setProgress(50 + Math.round((i / totalFrames) * 50));
+      await new Promise(r => setTimeout(r, frameDelay));
+    }
+    recorder.stop();
+    await stopped;
+    track.stop();
+
+    return { blob: new Blob(chunks, { type: choice.mime.split(';')[0] }), extension: choice.extension };
   }
 
   window.generate = async function() {
