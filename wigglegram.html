@@ -841,6 +841,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       this._glCanvas = null;
       this._lastMode = null;
       this._lastParams = null;
+      this._compositor = null;
+      this._THREE = null;
     }
 
     stopOscillation() {
@@ -870,8 +872,110 @@ sharp predict -i your_image.jpg -o output/</pre>
         this._originalCanvas.style.display = '';
         this._originalCanvas = null;
       }
+      if (this._compositor) {
+        this._compositor.renderTarget.dispose();
+        this._compositor.material.dispose();
+        this._compositor = null;
+      }
       if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
       if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
+    }
+
+    _ensureCompositor(w, h) {
+      const THREE = this._THREE;
+      if (!THREE || !this.renderer) return;
+      if (this._compositor && this._compositor.width === w && this._compositor.height === h) return;
+      if (this._compositor) {
+        this._compositor.renderTarget.dispose();
+        this._compositor.material.dispose();
+        this._compositor.scene.remove(this._compositor.scene.children[0]);
+      }
+      const depthTexture = new THREE.DepthTexture(w, h);
+      depthTexture.type = THREE.UnsignedIntType;
+      const renderTarget = new THREE.WebGLRenderTarget(w, h, { depthTexture, depthBuffer: true });
+      const material = new THREE.ShaderMaterial({
+        uniforms: {
+          tDiffuse: { value: renderTarget.texture },
+          tDepth: { value: depthTexture },
+          cameraNear: { value: this.camera.near },
+          cameraFar: { value: this.camera.far },
+          flashEnabled: { value: false },
+          flashIntensity: { value: 1.0 },
+          flashFalloff: { value: 4.0 },
+          flashWarmth: { value: 0.0 },
+        },
+        vertexShader: `
+          varying vec2 vUv;
+          void main() {
+            vUv = uv;
+            gl_Position = vec4(position.xy, 0.0, 1.0);
+          }
+        `,
+        fragmentShader: `
+          uniform sampler2D tDiffuse;
+          uniform sampler2D tDepth;
+          uniform float cameraNear;
+          uniform float cameraFar;
+          uniform bool flashEnabled;
+          uniform float flashIntensity;
+          uniform float flashFalloff;
+          uniform float flashWarmth;
+          varying vec2 vUv;
+
+          float linearizeDepth(float z) {
+            float zNdc = z * 2.0 - 1.0;
+            return (2.0 * cameraNear * cameraFar) / (cameraFar + cameraNear - zNdc * (cameraFar - cameraNear));
+          }
+
+          void main() {
+            vec4 color = texture2D(tDiffuse, vUv);
+            if (!flashEnabled) {
+              gl_FragColor = color;
+              return;
+            }
+            float depth = texture2D(tDepth, vUv).x;
+            float dist = linearizeDepth(depth);
+            float falloff = clamp(1.0 - dist / max(flashFalloff, 0.001), 0.0, 1.0);
+            falloff = pow(falloff, 1.5);
+            vec2 centered = vUv - 0.5;
+            float vignette = clamp(1.0 - dot(centered, centered) * 1.5, 0.0, 1.0);
+            float light = falloff * vignette * flashIntensity;
+            vec3 warm = vec3(1.0 + flashWarmth * 0.15, 1.0, 1.0 - flashWarmth * 0.15);
+            vec3 lit = color.rgb * (1.0 + light) * warm;
+            gl_FragColor = vec4(lit, color.a);
+          }
+        `,
+      });
+      const quad = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), material);
+      const scene = new THREE.Scene();
+      scene.add(quad);
+      const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+      this._compositor = { width: w, height: h, renderTarget, material, scene, camera };
+    }
+
+    _renderWithFlash() {
+      const w = this.renderer.domElement.width;
+      const h = this.renderer.domElement.height;
+      this._ensureCompositor(w, h);
+      if (!this._compositor) {
+        // Fallback: no compositor available, render straight to canvas.
+        this.renderer.setRenderTarget(null);
+        this.viewer.update();
+        this.viewer.render();
+        return;
+      }
+      const { renderTarget, material, scene, camera } = this._compositor;
+      material.uniforms.flashEnabled.value = !!PARAMS.flashEnabled;
+      material.uniforms.flashIntensity.value = PARAMS.flashIntensity;
+      material.uniforms.flashFalloff.value = PARAMS.flashFalloff;
+      material.uniforms.flashWarmth.value = PARAMS.flashWarmth;
+
+      this.renderer.setRenderTarget(renderTarget);
+      this.viewer.update();
+      this.viewer.render();
+
+      this.renderer.setRenderTarget(null);
+      this.renderer.render(scene, camera);
     }
 
     async load(file, paneCanvas) {
@@ -889,6 +993,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       let THREE, GS3D;
       try {
         THREE = await import('three');
+        this._THREE = THREE;
         GS3D = await import('@mkkellogg/gaussian-splats-3d');
       } catch (err) {
         console.error('splat library load failed:', err);
