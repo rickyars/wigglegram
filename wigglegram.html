@@ -1202,8 +1202,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         const t = (performance.now() - startTime) / 1000;
         const angle = Math.sin(t * Math.PI / 2) * (PARAMS.splatSwingAngle * Math.PI / 180);
         this.positionCamera(mode, angle, params);
-        this.viewer.update();
-        this.viewer.render();
+        this._renderWithFlash();
         this.oscId = requestAnimationFrame(tick);
       };
       this.oscId = requestAnimationFrame(tick);
@@ -1228,10 +1227,8 @@ sharp predict -i your_image.jpg -o output/</pre>
         });
       }
 
-      // Render color to default framebuffer
-      this.renderer.setRenderTarget(null);
-      this.viewer.update();
-      this.viewer.render();
+      // Render color (with flash compositing) to default framebuffer
+      this._renderWithFlash();
 
       // Read color pixels (WebGL reads bottom-to-top, needs flip)
       const gl = this.renderer.getContext();
