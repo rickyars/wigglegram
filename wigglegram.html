@@ -875,6 +875,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (this._compositor) {
         this._compositor.renderTarget.dispose();
         this._compositor.material.dispose();
+        this._compositor.quad.geometry.dispose();
         this._compositor = null;
       }
       if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
@@ -888,6 +889,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (this._compositor) {
         this._compositor.renderTarget.dispose();
         this._compositor.material.dispose();
+        this._compositor.quad.geometry.dispose();
         this._compositor.scene.remove(this._compositor.scene.children[0]);
       }
       const depthTexture = new THREE.DepthTexture(w, h);
@@ -950,10 +952,17 @@ sharp predict -i your_image.jpg -o output/</pre>
       const scene = new THREE.Scene();
       scene.add(quad);
       const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-      this._compositor = { width: w, height: h, renderTarget, material, scene, camera };
+      this._compositor = { width: w, height: h, renderTarget, material, scene, camera, quad };
     }
 
     _renderWithFlash() {
+      if (!PARAMS.flashEnabled) {
+        // Flash off: render directly to canvas (preserves MSAA and color output).
+        this.renderer.setRenderTarget(null);
+        this.viewer.update();
+        this.viewer.render();
+        return;
+      }
       const w = this.renderer.domElement.width;
       const h = this.renderer.domElement.height;
       this._ensureCompositor(w, h);
@@ -982,6 +991,12 @@ sharp predict -i your_image.jpg -o output/</pre>
       this.stopOscillation();
       if (this.viewer) { try { this.viewer.dispose(); } catch(e) {} this.viewer = null; }
       if (this.renderer) { this.renderer.dispose(); this.renderer = null; }
+      if (this._compositor) {
+        this._compositor.renderTarget.dispose();
+        this._compositor.material.dispose();
+        this._compositor.quad.geometry.dispose();
+        this._compositor = null;
+      }
 
       this.file = file;
 
