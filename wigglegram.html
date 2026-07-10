@@ -444,6 +444,10 @@ sharp predict -i your_image.jpg -o output/</pre>
     splatOffsetX: 0,
     splatOffsetY: 0,
     format: 'gif',
+    flashEnabled: false,
+    flashIntensity: 1.0,
+    flashFalloff: 4.0,
+    flashWarmth: 0.3,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
@@ -460,6 +464,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   let fovBinding = null;
   let depthFolder = null;
   let splatFolder = null;
+  let flashFolder = null;
 
   // ─── BLUE NOISE LOADER ──────────────────────────────────────────────────────
   (async function loadBlueNoise() {
@@ -560,6 +565,27 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (activeDepthSource instanceof SplatDepthSource) {
         activeDepthSource.repositionCamera(PARAMS.splatZoom);
       }
+    });
+
+    // ── Flash (hidden until a splat is loaded) ──
+    flashFolder = pane.addFolder({ title: 'Flash' });
+    flashFolder.hidden = true;
+
+    flashFolder.addBinding(PARAMS, 'flashEnabled', { label: 'enabled' });
+
+    flashFolder.addBinding(PARAMS, 'flashIntensity', {
+      label: 'intensity',
+      min: 0, max: 3.0, step: 0.05,
+    });
+
+    flashFolder.addBinding(PARAMS, 'flashFalloff', {
+      label: 'falloff range',
+      min: 0.5, max: 20.0, step: 0.1,
+    });
+
+    flashFolder.addBinding(PARAMS, 'flashWarmth', {
+      label: 'warmth',
+      min: -1.0, max: 1.0, step: 0.05,
     });
 
     // ── Optics (always visible) ──
@@ -1161,6 +1187,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       activeDepthSource.renderToPane(depthPaneCanvas);
       if (depthFolder) depthFolder.hidden = false;
       if (splatFolder) splatFolder.hidden = true;
+      if (flashFolder) flashFolder.hidden = true;
       updateMotionBinding(PARAMS.mode, false);
       document.getElementById('splatModeToggle').classList.add('visible');
       document.getElementById('splatDepthBtn').classList.add('active');
@@ -1196,6 +1223,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         disposeSplat();
         activeDepthSource = new LuminanceDepthSource(srcImageData);
         if (splatFolder) splatFolder.hidden = true;
+        if (flashFolder) flashFolder.hidden = true;
         if (depthFolder) depthFolder.hidden = true;
         document.getElementById('splatModeToggle').classList.remove('visible');
         activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
@@ -1271,6 +1299,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       document.getElementById('splat3DBtn').classList.remove('disabled');
       if (depthFolder) depthFolder.hidden = true;
       if (splatFolder) splatFolder.hidden = false;
+      if (flashFolder) flashFolder.hidden = false;
       updateMotionBinding(null, true);
     }).catch(err => {
       console.error('splat load error:', err);
@@ -1285,6 +1314,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
     if (depthFolder) depthFolder.hidden = !(activeDepthSource instanceof ImageDepthSource);
     if (splatFolder) splatFolder.hidden = true;
+    if (flashFolder) flashFolder.hidden = true;
     updateMotionBinding(PARAMS.mode, false);
     updateDepthPaneLabel(savedDepthLabel);
     document.getElementById('splatDepthBtn').classList.add('active');
@@ -1301,6 +1331,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     hidePreview();
     if (depthFolder) depthFolder.hidden = true;
     if (splatFolder) splatFolder.hidden = false;
+    if (flashFolder) flashFolder.hidden = false;
     updateMotionBinding(null, true);
     updateDepthPaneLabel('splat (3D)');
     document.getElementById('splatDepthBtn').classList.remove('active');
@@ -1484,6 +1515,7 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     disposeSplat();
     if (splatFolder) splatFolder.hidden = true;
+    if (flashFolder) flashFolder.hidden = true;
     if (depthFolder) depthFolder.hidden = true;
     document.getElementById('splatModeToggle').classList.remove('visible');
     activeDepthSource = new LuminanceDepthSource(srcImageData);
