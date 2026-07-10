@@ -446,7 +446,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     format: 'gif',
     flashEnabled: false,
     flashIntensity: 1.0,
-    flashFalloff: 4.0,
+    flashFalloff: 8.0,
     flashWarmth: 0.3,
   };
 
@@ -579,8 +579,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     });
 
     flashFolder.addBinding(PARAMS, 'flashFalloff', {
-      label: 'falloff range',
-      min: 0.5, max: 20.0, step: 0.1,
+      label: 'falloff (x subject dist)',
+      min: 1.0, max: 20.0, step: 0.1,
     });
 
     flashFolder.addBinding(PARAMS, 'flashWarmth', {
@@ -941,9 +941,15 @@ sharp predict -i your_image.jpg -o output/</pre>
             falloff = pow(falloff, 1.5);
             vec2 centered = vUv - 0.5;
             float vignette = clamp(1.0 - dot(centered, centered) * 1.5, 0.0, 1.0);
-            float light = falloff * vignette * flashIntensity;
-            vec3 warm = vec3(1.0 + flashWarmth * 0.15, 1.0, 1.0 - flashWarmth * 0.15);
-            vec3 lit = color.rgb * (1.0 + light) * warm;
+            float light = falloff * vignette;
+            // Flash exposure: lit areas boosted, unlit areas fall toward black.
+            // strength fades the whole effect in over intensity 0..1 so 0 = no-op.
+            float strength = clamp(flashIntensity, 0.0, 1.0);
+            float ambient = 0.12;
+            float exposure = mix(1.0, mix(ambient, 1.0 + flashIntensity, light), strength);
+            vec3 warmColor = vec3(1.0 + flashWarmth * 0.25, 1.0, 1.0 - flashWarmth * 0.25);
+            vec3 warm = mix(vec3(1.0), warmColor, light * strength);
+            vec3 lit = color.rgb * exposure * warm;
             gl_FragColor = vec4(lit, color.a);
           }
         `,
@@ -976,12 +982,20 @@ sharp predict -i your_image.jpg -o output/</pre>
       const { renderTarget, material, scene, camera } = this._compositor;
       material.uniforms.flashEnabled.value = !!PARAMS.flashEnabled;
       material.uniforms.flashIntensity.value = PARAMS.flashIntensity;
-      material.uniforms.flashFalloff.value = PARAMS.flashFalloff;
+      // Falloff is expressed in multiples of the camera-to-subject distance so
+      // the same slider value works regardless of the splat's scene scale.
+      material.uniforms.flashFalloff.value = PARAMS.flashFalloff * (this._autoFitDist || 3.0) * PARAMS.splatZoom;
       material.uniforms.flashWarmth.value = PARAMS.flashWarmth;
 
       this.renderer.setRenderTarget(renderTarget);
+      // Splats are alpha-blended and don't write depth by default, which leaves
+      // the depth texture at the far plane; force depth writes for this pass so
+      // the flash falloff has real per-pixel distances.
+      const splatMat = this.viewer.splatMesh && this.viewer.splatMesh.material;
+      if (splatMat) splatMat.depthWrite = true;
       this.viewer.update();
       this.viewer.render();
+      if (splatMat) splatMat.depthWrite = false;
 
       this.renderer.setRenderTarget(null);
       this.renderer.render(scene, camera);
