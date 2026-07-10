@@ -905,6 +905,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           flashIntensity: { value: 1.0 },
           flashFalloff: { value: 4.0 },
           flashWarmth: { value: 0.0 },
+          texelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
         },
         vertexShader: `
           varying vec2 vUv;
@@ -922,6 +923,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           uniform float flashIntensity;
           uniform float flashFalloff;
           uniform float flashWarmth;
+          uniform vec2 texelSize;
           varying vec2 vUv;
 
           float linearizeDepth(float z) {
@@ -935,7 +937,15 @@ sharp predict -i your_image.jpg -o output/</pre>
               gl_FragColor = color;
               return;
             }
+            // Splat coverage has pixel-sized gaps where no depth is written and
+            // the buffer reads far-plane; take the nearest depth of a 5-tap
+            // neighborhood so those holes don't punch black speckles in the
+            // lit subject.
             float depth = texture2D(tDepth, vUv).x;
+            depth = min(depth, texture2D(tDepth, vUv + vec2(texelSize.x, 0.0)).x);
+            depth = min(depth, texture2D(tDepth, vUv - vec2(texelSize.x, 0.0)).x);
+            depth = min(depth, texture2D(tDepth, vUv + vec2(0.0, texelSize.y)).x);
+            depth = min(depth, texture2D(tDepth, vUv - vec2(0.0, texelSize.y)).x);
             float dist = linearizeDepth(depth);
             float falloff = clamp(1.0 - dist / max(flashFalloff, 0.001), 0.0, 1.0);
             falloff = pow(falloff, 1.5);
@@ -945,7 +955,7 @@ sharp predict -i your_image.jpg -o output/</pre>
             // Flash exposure: lit areas boosted, unlit areas fall toward black.
             // strength fades the whole effect in over intensity 0..1 so 0 = no-op.
             float strength = clamp(flashIntensity, 0.0, 1.0);
-            float ambient = 0.12;
+            float ambient = 0.18;
             float exposure = mix(1.0, mix(ambient, 1.0 + flashIntensity, light), strength);
             vec3 warmColor = vec3(1.0 + flashWarmth * 0.25, 1.0, 1.0 - flashWarmth * 0.25);
             vec3 warm = mix(vec3(1.0), warmColor, light * strength);
