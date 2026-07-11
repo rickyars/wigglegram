@@ -448,6 +448,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     flashIntensity: 1.0,
     flashFalloff: 8.0,
     flashWarmth: 0.3,
+    flashVignette: 1.0,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
@@ -583,6 +584,11 @@ sharp predict -i your_image.jpg -o output/</pre>
       min: 1.0, max: 20.0, step: 0.1,
     });
 
+    flashFolder.addBinding(PARAMS, 'flashVignette', {
+      label: 'vignette',
+      min: 0.0, max: 2.0, step: 0.05,
+    });
+
     flashFolder.addBinding(PARAMS, 'flashWarmth', {
       label: 'warmth',
       min: -1.0, max: 1.0, step: 0.05,
@@ -707,12 +713,17 @@ sharp predict -i your_image.jpg -o output/</pre>
     const height = scaledSrc.height;
     let colorData;
 
+    // Apply the flash to the source BEFORE warping so the lighting moves with
+    // the subject; lighting the warped frame with the unwarped depth map tears
+    // bright/dark fringes at depth edges as the view swings.
+    const litSrc = applyFlash2D(scaledSrc.data, scaledDepth, width, height);
+
     if (mode === 'orbit') {
-      colorData = generateFrameOrbit(scaledSrc.data, scaledDepth, xOffset, width, height);
+      colorData = generateFrameOrbit(litSrc, scaledDepth, xOffset, width, height);
     } else if (mode === 'warp') {
-      colorData = generateFrameWarp(scaledSrc.data, scaledDepth, xOffset, width, height);
+      colorData = generateFrameWarp(litSrc, scaledDepth, xOffset, width, height);
     } else {
-      colorData = generateFrameParallax(scaledSrc.data, scaledDepth, xOffset, width, height);
+      colorData = generateFrameParallax(litSrc, scaledDepth, xOffset, width, height);
     }
 
     return {
@@ -905,6 +916,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           flashIntensity: { value: 1.0 },
           flashFalloff: { value: 4.0 },
           flashWarmth: { value: 0.0 },
+          flashVignette: { value: 1.0 },
           texelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
         },
         vertexShader: `
@@ -923,6 +935,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           uniform float flashIntensity;
           uniform float flashFalloff;
           uniform float flashWarmth;
+          uniform float flashVignette;
           uniform vec2 texelSize;
           varying vec2 vUv;
 
@@ -942,7 +955,7 @@ sharp predict -i your_image.jpg -o output/</pre>
             float falloff = clamp(1.0 - dist / max(flashFalloff, 0.001), 0.0, 1.0);
             falloff = pow(falloff, 1.5);
             vec2 centered = vUv - 0.5;
-            float vignette = clamp(1.0 - dot(centered, centered) * 1.5, 0.0, 1.0);
+            float vignette = clamp(1.0 - dot(centered, centered) * 1.5 * flashVignette, 0.0, 1.0);
             float light = falloff * vignette;
             // Flash exposure: lit areas boosted, unlit areas fall toward black.
             // strength fades the whole effect in over intensity 0..1 so 0 = no-op.
@@ -988,6 +1001,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       // the same slider value works regardless of the splat's scene scale.
       material.uniforms.flashFalloff.value = PARAMS.flashFalloff * (this._autoFitDist || 3.0) * PARAMS.splatZoom;
       material.uniforms.flashWarmth.value = PARAMS.flashWarmth;
+      material.uniforms.flashVignette.value = PARAMS.flashVignette;
 
       this.renderer.setRenderTarget(renderTarget);
       // Splats are alpha-blended and don't write depth by default, which leaves
@@ -1739,7 +1753,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
         const nx = x / width - 0.5;
-        const vignette = Math.max(0, 1 - (nx * nx + ny * ny) * 1.5);
+        const vignette = Math.max(0, 1 - (nx * nx + ny * ny) * 1.5 * PARAMS.flashVignette);
         const light = Math.pow(depth[i], gamma) * vignette;
         const exposure = 1 + strength * (ambient + (boost - ambient) * light - 1);
         const wAmt = light * strength * warmth * 0.25;
@@ -2263,8 +2277,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     for (const t of positions) {
       if (gen !== previewGeneration || activeDepthSource !== forSource) return;
       const { colorData } = await captureDepthMapFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
-      let px = applyFlash2D(colorData, depth, width, height);
-      px = applyLightWrap(px, depth, wrapRadius, width, height);
+      let px = applyLightWrap(colorData, depth, wrapRadius, width, height);
       px = circularDiscBokeh(px, depth, PARAMS.focusDist, cocScale, width, height);
       px = applyChromaticAberration(px, PARAMS.chromaticAberr, t, width, height);
       viewFrames.push(new ImageData(px, width, height));
@@ -2370,9 +2383,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       const { colorData, depthArray, width: fw, height: fh } =
         await activeDepthSource.captureFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
 
-      // Flash for 2D sources happens here; splat mode applies it in-render.
-      let framePixels = isSplat3D ? colorData : applyFlash2D(colorData, depthArray, fw, fh);
-      framePixels = applyLightWrap(framePixels, depthArray, wrapRadius, fw, fh);
+      let framePixels = applyLightWrap(colorData, depthArray, wrapRadius, fw, fh);
       framePixels = circularDiscBokeh(framePixels, depthArray, focusDist, cocScale, fw, fh);
       framePixels = applyChromaticAberration(framePixels, caStrength, t, fw, fh);
 
