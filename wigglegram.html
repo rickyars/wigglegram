@@ -937,15 +937,7 @@ sharp predict -i your_image.jpg -o output/</pre>
               gl_FragColor = color;
               return;
             }
-            // Splat coverage has pixel-sized gaps where no depth is written and
-            // the buffer reads far-plane; take the nearest depth of a 5-tap
-            // neighborhood so those holes don't punch black speckles in the
-            // lit subject.
             float depth = texture2D(tDepth, vUv).x;
-            depth = min(depth, texture2D(tDepth, vUv + vec2(texelSize.x, 0.0)).x);
-            depth = min(depth, texture2D(tDepth, vUv - vec2(texelSize.x, 0.0)).x);
-            depth = min(depth, texture2D(tDepth, vUv + vec2(0.0, texelSize.y)).x);
-            depth = min(depth, texture2D(tDepth, vUv - vec2(0.0, texelSize.y)).x);
             float dist = linearizeDepth(depth);
             float falloff = clamp(1.0 - dist / max(flashFalloff, 0.001), 0.0, 1.0);
             falloff = pow(falloff, 1.5);
