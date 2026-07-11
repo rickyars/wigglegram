@@ -1320,7 +1320,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       activeDepthSource.renderToPane(depthPaneCanvas);
       if (depthFolder) depthFolder.hidden = false;
       if (splatFolder) splatFolder.hidden = true;
-      if (flashFolder) flashFolder.hidden = true;
+      if (flashFolder) flashFolder.hidden = false;
       updateMotionBinding(PARAMS.mode, false);
       document.getElementById('splatModeToggle').classList.add('visible');
       document.getElementById('splatDepthBtn').classList.add('active');
@@ -1356,7 +1356,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         disposeSplat();
         activeDepthSource = new LuminanceDepthSource(srcImageData);
         if (splatFolder) splatFolder.hidden = true;
-        if (flashFolder) flashFolder.hidden = true;
+        if (flashFolder) flashFolder.hidden = false;
         if (depthFolder) depthFolder.hidden = true;
         document.getElementById('splatModeToggle').classList.remove('visible');
         activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
@@ -1447,7 +1447,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
     if (depthFolder) depthFolder.hidden = !(activeDepthSource instanceof ImageDepthSource);
     if (splatFolder) splatFolder.hidden = true;
-    if (flashFolder) flashFolder.hidden = true;
+    if (flashFolder) flashFolder.hidden = false;
     updateMotionBinding(PARAMS.mode, false);
     updateDepthPaneLabel(savedDepthLabel);
     document.getElementById('splatDepthBtn').classList.add('active');
@@ -1648,7 +1648,7 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     disposeSplat();
     if (splatFolder) splatFolder.hidden = true;
-    if (flashFolder) flashFolder.hidden = true;
+    if (flashFolder) flashFolder.hidden = false;
     if (depthFolder) depthFolder.hidden = true;
     document.getElementById('splatModeToggle').classList.remove('visible');
     activeDepthSource = new LuminanceDepthSource(srcImageData);
@@ -1713,6 +1713,41 @@ sharp predict -i your_image.jpg -o output/</pre>
           out[di] = srcData[di]; out[di+1] = srcData[di+1];
           out[di+2] = srcData[di+2]; out[di+3] = srcData[di+3];
         }
+      }
+    }
+    return out;
+  }
+
+  // ─── SYNTHETIC FLASH (2D DEPTH-MAP MODE) ───────────────────────────────────
+  // Same exposure model as the splat-mode composite shader: near pixels get
+  // boosted, far pixels fall toward an ambient floor, with a radial vignette
+  // and a warmth tint where the flash lands. depth is normalized [0,1], 1 = near.
+  function applyFlash2D(frameData, depth, width, height) {
+    if (!PARAMS.flashEnabled) return frameData;
+    const strength = Math.min(Math.max(PARAMS.flashIntensity, 0), 1);
+    if (strength === 0) return frameData;
+    // Map the falloff slider (1..20; in 3D mode, multiples of subject
+    // distance) onto a depth-response exponent: low = light hugs the nearest
+    // surfaces, high = reaches deep into the scene.
+    const gamma = 20 / Math.max(PARAMS.flashFalloff, 1);
+    const warmth = PARAMS.flashWarmth;
+    const ambient = 0.18;
+    const boost = 1 + PARAMS.flashIntensity;
+    const out = new Uint8ClampedArray(frameData.length);
+    for (let y = 0; y < height; y++) {
+      const ny = y / height - 0.5;
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const nx = x / width - 0.5;
+        const vignette = Math.max(0, 1 - (nx * nx + ny * ny) * 1.5);
+        const light = Math.pow(depth[i], gamma) * vignette;
+        const exposure = 1 + strength * (ambient + (boost - ambient) * light - 1);
+        const wAmt = light * strength * warmth * 0.25;
+        const p = i * 4;
+        out[p]     = frameData[p]     * exposure * (1 + wAmt);
+        out[p + 1] = frameData[p + 1] * exposure;
+        out[p + 2] = frameData[p + 2] * exposure * (1 - wAmt);
+        out[p + 3] = frameData[p + 3];
       }
     }
     return out;
@@ -2228,7 +2263,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     for (const t of positions) {
       if (gen !== previewGeneration || activeDepthSource !== forSource) return;
       const { colorData } = await captureDepthMapFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
-      let px = applyLightWrap(colorData, depth, wrapRadius, width, height);
+      let px = applyFlash2D(colorData, depth, width, height);
+      px = applyLightWrap(px, depth, wrapRadius, width, height);
       px = circularDiscBokeh(px, depth, PARAMS.focusDist, cocScale, width, height);
       px = applyChromaticAberration(px, PARAMS.chromaticAberr, t, width, height);
       viewFrames.push(new ImageData(px, width, height));
@@ -2334,7 +2370,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       const { colorData, depthArray, width: fw, height: fh } =
         await activeDepthSource.captureFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
 
-      let framePixels = applyLightWrap(colorData, depthArray, wrapRadius, fw, fh);
+      // Flash for 2D sources happens here; splat mode applies it in-render.
+      let framePixels = isSplat3D ? colorData : applyFlash2D(colorData, depthArray, fw, fh);
+      framePixels = applyLightWrap(framePixels, depthArray, wrapRadius, fw, fh);
       framePixels = circularDiscBokeh(framePixels, depthArray, focusDist, cocScale, fw, fh);
       framePixels = applyChromaticAberration(framePixels, caStrength, t, fw, fh);
 
