@@ -340,6 +340,7 @@
           <div class="splat-mode-toggle" id="intrinsicToggle">
             <button class="splat-mode-btn" id="paneAlbedoBtn">[albedo]</button>
             <button class="splat-mode-btn" id="paneSpecBtn">[spec]</button>
+            <button class="splat-mode-btn" id="paneNormalsBtn">[normals]</button>
           </div>
           <div class="splat-mode-toggle" id="splatModeToggle">
             <button class="splat-mode-btn active" id="splatDepthBtn">[depth]</button>
@@ -777,13 +778,13 @@ sharp predict -i your_image.jpg -o output/</pre>
     // Apply lighting to the source BEFORE warping so it moves with the
     // subject; lighting the warped frame with the unwarped depth map tears
     // bright/dark fringes at depth edges as the view swings. Relight (light
-    // direction synced to t) takes precedence over the static flash.
-    let litSrc;
+    // direction synced to t) and flash (blowout + vignette) stack: relight
+    // shapes the surfaces, flash blows out the exposure like a real strobe.
+    let litSrc = scaledSrc.data;
     if (params.relightEnabled && albedoImageData) {
-      litSrc = applyRelight2D(scaledSrc.data, scaledSpec || null, scaledDepth, t, width, height);
-    } else {
-      litSrc = applyFlash2D(scaledSrc.data, scaledDepth, width, height);
+      litSrc = applyRelight2D(litSrc, scaledSpec || null, scaledDepth, t, width, height);
     }
+    litSrc = applyFlash2D(litSrc, scaledDepth, width, height);
 
     if (mode === 'orbit') {
       colorData = generateFrameOrbit(litSrc, scaledDepth, xOffset, width, height);
@@ -1022,6 +1023,8 @@ sharp predict -i your_image.jpg -o output/</pre>
 
           void main() {
             vec4 color = texture2D(tDiffuse, vUv);
+            vec3 rgb = color.rgb;
+
             if (relightEnabled) {
               // Geometric normals from the splat's own depth buffer — much
               // finer than any 2D depth map. Screen x/y, z toward camera.
@@ -1034,29 +1037,30 @@ sharp predict -i your_image.jpg -o output/</pre>
               vec3 h = normalize(lightDir + vec3(0.0, 0.0, 1.0));
               float specMask = hasSpec ? dot(texture2D(tSpec, vUv).rgb, vec3(0.299, 0.587, 0.114)) : 0.25;
               float spec = specStrength * specMask * pow(max(dot(n, h), 0.0), shininess);
-              gl_FragColor = vec4(color.rgb * shade + spec, color.a);
-              return;
+              rgb = rgb * shade + spec;
             }
-            if (!flashEnabled) {
-              gl_FragColor = color;
-              return;
+
+            if (flashEnabled) {
+              // Flash blowout stacks ON TOP of relight: surfaces get shape
+              // from the relight pass, then the strobe blows out near planes.
+              float depth = texture2D(tDepth, vUv).x;
+              float dist = linearizeDepth(depth);
+              float falloff = clamp(1.0 - dist / max(flashFalloff, 0.001), 0.0, 1.0);
+              falloff = pow(falloff, 1.5);
+              vec2 centered = vUv - 0.5;
+              float vignette = clamp(1.0 - dot(centered, centered) * 1.5 * flashVignette, 0.0, 1.0);
+              float light = falloff * vignette;
+              // Flash exposure: lit areas boosted, unlit areas fall toward black.
+              // strength fades the whole effect in over intensity 0..1 so 0 = no-op.
+              float strength = clamp(flashIntensity, 0.0, 1.0);
+              float ambient = 0.18;
+              float exposure = mix(1.0, mix(ambient, 1.0 + flashIntensity, light), strength);
+              vec3 warmColor = vec3(1.0 + flashWarmth * 0.25, 1.0, 1.0 - flashWarmth * 0.25);
+              vec3 warm = mix(vec3(1.0), warmColor, light * strength);
+              rgb = rgb * exposure * warm;
             }
-            float depth = texture2D(tDepth, vUv).x;
-            float dist = linearizeDepth(depth);
-            float falloff = clamp(1.0 - dist / max(flashFalloff, 0.001), 0.0, 1.0);
-            falloff = pow(falloff, 1.5);
-            vec2 centered = vUv - 0.5;
-            float vignette = clamp(1.0 - dot(centered, centered) * 1.5 * flashVignette, 0.0, 1.0);
-            float light = falloff * vignette;
-            // Flash exposure: lit areas boosted, unlit areas fall toward black.
-            // strength fades the whole effect in over intensity 0..1 so 0 = no-op.
-            float strength = clamp(flashIntensity, 0.0, 1.0);
-            float ambient = 0.18;
-            float exposure = mix(1.0, mix(ambient, 1.0 + flashIntensity, light), strength);
-            vec3 warmColor = vec3(1.0 + flashWarmth * 0.25, 1.0, 1.0 - flashWarmth * 0.25);
-            vec3 warm = mix(vec3(1.0), warmColor, light * strength);
-            vec3 lit = color.rgb * exposure * warm;
-            gl_FragColor = vec4(lit, color.a);
+
+            gl_FragColor = vec4(rgb, color.a);
           }
         `,
       });
@@ -1087,7 +1091,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         return;
       }
       const { renderTarget, material, scene, camera } = this._compositor;
-      material.uniforms.flashEnabled.value = !!PARAMS.flashEnabled && !relightActive;
+      material.uniforms.flashEnabled.value = !!PARAMS.flashEnabled;
       material.uniforms.flashIntensity.value = PARAMS.flashIntensity;
       // Falloff is expressed in multiples of the camera-to-subject distance so
       // the same slider value works regardless of the splat's scene scale.
@@ -1433,6 +1437,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   document.getElementById('splat3DBtn').addEventListener('click', switchTo3DView);
   document.getElementById('paneAlbedoBtn').addEventListener('click', () => togglePaneView('albedo'));
   document.getElementById('paneSpecBtn').addEventListener('click', () => togglePaneView('specular'));
+  document.getElementById('paneNormalsBtn').addEventListener('click', () => togglePaneView('normals'));
   console.log('[wigglegram] event listeners registered');
 
   document.getElementById('depthSourceInput').addEventListener('change', (e) => {
@@ -1856,6 +1861,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     updateMotionBinding(PARAMS.mode, false);
     updateDepthPaneLabel(label);
     document.getElementById('generateBtn').disabled = false;
+    // Normals view only needs depth; albedo/spec buttons no-op until decomposed
+    document.getElementById('intrinsicToggle').classList.add('visible');
     setStatus(label.replace('depth (', '').replace(')', '') + ' depth ready', 'done');
     schedulePreviewRebuild();
   }
@@ -1870,15 +1877,48 @@ sharp predict -i your_image.jpg -o output/</pre>
   // ─── DECOMPOSITION PANE VIEWS ([albedo]/[spec] toggle on the depth pane) ───
   let paneView = 'depth';
 
+  // Visualize the normals the relight shading actually uses (smoothed depth
+  // gradients), as a standard RGB normal map.
+  function buildNormalsView() {
+    if (!(activeDepthSource instanceof ImageDepthSource)) return null;
+    const src = activeDepthSource.depthImageData;
+    const width = src.width, height = src.height;
+    let depth = computeLuminanceDepth(src, PARAMS.invertDepth);
+    depth = boxBlur(depth, width, height, 2);
+    depth = boxBlur(depth, width, height, 2);
+    const k = PARAMS.normalStrength * Math.min(width, height) * 0.05;
+    const out = new ImageData(width, height);
+    for (let y = 0; y < height; y++) {
+      const y0 = Math.max(y - 2, 0) * width;
+      const y1 = Math.min(y + 2, height - 1) * width;
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const xm = Math.max(x - 2, 0);
+        const xp = Math.min(x + 2, width - 1);
+        const dzdx = (depth[y * width + xp] - depth[y * width + xm]) * 0.25 * k;
+        const dzdy = (depth[y1 + x] - depth[y0 + x]) * 0.25 * k;
+        let nx = -dzdx, ny = dzdy, nz = 1;
+        const nn = Math.hypot(nx, ny, nz);
+        const p = i * 4;
+        out.data[p]     = (nx / nn * 0.5 + 0.5) * 255;
+        out.data[p + 1] = (ny / nn * 0.5 + 0.5) * 255;
+        out.data[p + 2] = (nz / nn * 0.5 + 0.5) * 255;
+        out.data[p + 3] = 255;
+      }
+    }
+    return out;
+  }
+
   function togglePaneView(kind) {
-    const img = kind === 'albedo' ? albedoImageData : specularImageData;
+    const img = kind === 'albedo' ? albedoImageData
+              : kind === 'specular' ? specularImageData
+              : buildNormalsView();
     if (!img) return;
     paneView = (paneView === kind) ? 'depth' : kind;
     const canvas = document.getElementById('depthCanvas');
-    const albBtn = document.getElementById('paneAlbedoBtn');
-    const specBtn = document.getElementById('paneSpecBtn');
-    albBtn.classList.toggle('active', paneView === 'albedo');
-    specBtn.classList.toggle('active', paneView === 'specular');
+    document.getElementById('paneAlbedoBtn').classList.toggle('active', paneView === 'albedo');
+    document.getElementById('paneSpecBtn').classList.toggle('active', paneView === 'specular');
+    document.getElementById('paneNormalsBtn').classList.toggle('active', paneView === 'normals');
     if (paneView === 'depth') {
       if (activeDepthSource && !(activeDepthSource instanceof SplatDepthSource)) {
         activeDepthSource.renderToPane(canvas);
@@ -1887,10 +1927,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       }
       return;
     }
-    const show = paneView === 'albedo' ? albedoImageData : specularImageData;
-    canvas.width = show.width;
-    canvas.height = show.height;
-    canvas.getContext('2d').putImageData(show, 0, 0);
+    canvas.width = img.width;
+    canvas.height = img.height;
+    canvas.getContext('2d').putImageData(img, 0, 0);
   }
 
   function clearDepthPane() {
