@@ -473,7 +473,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     normalStrength: 3.0,
     specStrength: 0.5,
     shininess: 24,
-    albedoBlend: 0.8,
+    albedoBlend: 1.0,
     intrinsicHQ: false,
   };
 
@@ -483,6 +483,8 @@ sharp predict -i your_image.jpg -o output/</pre>
   let albedoImageData = null;   // Marigold-IID decomposition (source res)
   let specularImageData = null;
   let normalsImageData = null;  // Marigold-Normals surface normal map (source res)
+  let shadingImageData = null;  // Marigold-IID original shading map (source res)
+  let shadingMean = [1, 1, 1];  // per-channel mean of the shading map (0-1)
   let activeDepthSource = null;
   let blueNoise = null;
   let gifBlobUrl = null;
@@ -658,7 +660,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       min: 2, max: 128, step: 1,
     });
     relightFolder.addBinding(PARAMS, 'albedoBlend', {
-      label: 'albedo blend',
+      label: 'strength',
       min: 0, max: 1, step: 0.05,
     });
 
@@ -954,6 +956,10 @@ sharp predict -i your_image.jpg -o output/</pre>
         this._normalsTexture.dispose();
         this._normalsTexture = null;
       }
+      if (this._shadeTexture) {
+        this._shadeTexture.dispose();
+        this._shadeTexture = null;
+      }
       if (this._compositor) {
         this._compositor.renderTarget.dispose();
         this._compositor.material.dispose();
@@ -999,6 +1005,10 @@ sharp predict -i your_image.jpg -o output/</pre>
           tNormals: { value: null },
           hasNormals: { value: false },
           normalGain: { value: 1.0 },
+          tShade: { value: null },
+          hasShade: { value: false },
+          shadeMean: { value: new THREE.Vector3(1, 1, 1) },
+          relightStrength: { value: 1.0 },
           texelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
         },
         vertexShader: `
@@ -1029,6 +1039,10 @@ sharp predict -i your_image.jpg -o output/</pre>
           uniform sampler2D tNormals;
           uniform bool hasNormals;
           uniform float normalGain;
+          uniform sampler2D tShade;
+          uniform bool hasShade;
+          uniform vec3 shadeMean;
+          uniform float relightStrength;
           uniform vec2 texelSize;
           varying vec2 vUv;
 
@@ -1071,7 +1085,16 @@ sharp predict -i your_image.jpg -o output/</pre>
               float specMask = hasSpec ? dot(texture2D(tSpec, vUv).rgb, vec3(0.299, 0.587, 0.114)) : 0.25;
               // Gate specular by diffuse so shadowed/noisy areas don't haze
               float spec = specStrength * specMask * pow(max(dot(n, h), 0.0), shininess) * smoothstep(0.0, 0.2, diff);
-              rgb = rgb * shade + spec;
+              if (hasShade) {
+                // Shading-ratio relight: splat colors are the original photo;
+                // dividing by the (mean-normalized) old shading removes the
+                // baked light exactly where the new shading re-adds it.
+                vec3 oldS = max(texture2D(tShade, vUv).rgb / shadeMean, vec3(0.25));
+                vec3 ratio = clamp(vec3(shade) / oldS, 0.25, 4.0);
+                rgb = rgb * mix(vec3(1.0), ratio, relightStrength) + spec * relightStrength;
+              } else {
+                rgb = rgb * shade + spec;
+              }
             }
 
             if (flashEnabled) {
@@ -1169,6 +1192,17 @@ sharp predict -i your_image.jpg -o output/</pre>
         material.uniforms.tNormals.value = this._normalsTexture || null;
         material.uniforms.hasNormals.value = !!this._normalsTexture;
         material.uniforms.normalGain.value = PARAMS.normalStrength / 3;
+        if (shadingImageData && !this._shadeTexture) {
+          const c = document.createElement('canvas');
+          c.width = shadingImageData.width;
+          c.height = shadingImageData.height;
+          c.getContext('2d').putImageData(shadingImageData, 0, 0);
+          this._shadeTexture = new this._THREE.CanvasTexture(c);
+        }
+        material.uniforms.tShade.value = this._shadeTexture || null;
+        material.uniforms.hasShade.value = !!this._shadeTexture;
+        material.uniforms.shadeMean.value.set(shadingMean[0], shadingMean[1], shadingMean[2]);
+        material.uniforms.relightStrength.value = PARAMS.albedoBlend;
       }
 
       this.renderer.setRenderTarget(renderTarget);
@@ -1552,6 +1586,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         albedoImageData = null;
         specularImageData = null;
         normalsImageData = null;
+        shadingImageData = null;
         PARAMS.relightEnabled = false;
         if (relightFolder) relightFolder.hidden = true;
         paneView = 'depth';
@@ -1744,22 +1779,14 @@ sharp predict -i your_image.jpg -o output/</pre>
     btn.querySelector('.label-text').textContent = 'Generating splat... (~1 min)';
     setStatus('generating splat via ml-sharp...', 'working');
     try {
-      // With a decomposition loaded, build the splat from the ALBEDO so its
-      // colors are shading-free — the relight compositor re-adds the light.
-      let body = srcFile;
-      let ctype = srcFile.type || 'image/jpeg';
-      if (albedoImageData) {
-        const c = document.createElement('canvas');
-        c.width = albedoImageData.width;
-        c.height = albedoImageData.height;
-        c.getContext('2d').putImageData(albedoImageData, 0, 0);
-        body = await new Promise(r => c.toBlob(r, 'image/png'));
-        ctype = 'image/png';
-      }
+      // The splat is always built from the ORIGINAL photo. Relighting works
+      // by shading RATIO (newShade / oldShade) in the compositor, which
+      // removes the baked light and applies the new one in a single step —
+      // no albedo-built splat needed, and no decompose-before-splat ordering.
       const resp = await fetch(COMPANION_URL + '/predict', {
         method: 'POST',
-        headers: { 'Content-Type': ctype },
-        body,
+        headers: { 'Content-Type': srcFile.type || 'image/jpeg' },
+        body: srcFile,
       });
       if (!resp.ok) {
         let msg = 'companion error ' + resp.status;
@@ -1779,8 +1806,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
   };
 
-  // Companion Marigold-IID: decompose the source photo into albedo +
-  // specular maps for the Relight system. Slow (diffusion, ~30-90s on GPU).
+  // Companion Marigold: decompose the source photo into albedo + specular +
+  // shading + normals for the Relight system (~10s warm).
   window.decomposeViaCompanion = async function() {
     if (!srcFile || companionBusy) {
       if (!srcFile) setStatus('load a source image first', 'error');
@@ -1819,11 +1846,20 @@ sharp predict -i your_image.jpg -o output/</pre>
       albedoImageData = await toImageData(data.albedo);
       specularImageData = await toImageData(data.specular);
       normalsImageData = data.normals ? await toImageData(data.normals) : null;
+      shadingImageData = data.shading ? await toImageData(data.shading) : null;
+      if (shadingImageData) {
+        // Per-channel mean, used to normalize the shading map so the relight
+        // ratio (newShade / oldShade) centers around 1 and overall exposure
+        // is preserved.
+        const d = shadingImageData.data;
+        let r = 0, g = 0, b = 0;
+        const n = shadingImageData.width * shadingImageData.height;
+        for (let i = 0; i < n; i++) { r += d[i * 4]; g += d[i * 4 + 1]; b += d[i * 4 + 2]; }
+        shadingMean = [Math.max(r / n / 255, 0.05), Math.max(g / n / 255, 0.05), Math.max(b / n / 255, 0.05)];
+      }
       if (relightFolder) relightFolder.hidden = false;
       PARAMS.relightEnabled = true;
       document.getElementById('intrinsicToggle').classList.add('visible');
-      const splatBtnLabel = document.getElementById('companionBtn').querySelector('.label-text');
-      if (splatBtnLabel) splatBtnLabel.textContent = 'Generate Splat (from albedo)';
       setStatus('decomposition ready \u2014 Relight controls unlocked', 'done');
       schedulePreviewRebuild();
     } catch (err) {
@@ -2130,6 +2166,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   // synced by construction. spec is a luminance map (Marigold-IID
   // specular output) or null.
   let scaledRelightNormals = null; // set by prepareScaledInputs, same dims as frame
+  let scaledRelightShade = null;   // original shading (mean-normalized), same dims
 
   function applyRelight2D(frameData, spec, depth, t, width, height) {
     if (!PARAMS.relightEnabled) return frameData;
@@ -2149,6 +2186,10 @@ sharp predict -i your_image.jpg -o output/</pre>
     const k = PARAMS.normalStrength * Math.min(width, height) * 0.05;
     const specStrength = PARAMS.specStrength;
     const shininess = PARAMS.shininess;
+    const strength = PARAMS.albedoBlend;
+    const oldShade = (scaledRelightShade
+      && scaledRelightShade.width === width
+      && scaledRelightShade.height === height) ? scaledRelightShade.data : null;
 
     // Preferred normal source: the Marigold-predicted normal map — real
     // per-pixel surface orientation (noses, folds, hair). The depth-gradient
@@ -2204,13 +2245,26 @@ sharp predict -i your_image.jpg -o output/</pre>
           const ndh = Math.max(nx * hx + ny * hy + nz * hz, 0);
           const specMap = spec ? spec[i] : 0.25;
           const gate = Math.min(diff / 0.2, 1);
-          specAdd = 255 * specStrength * specMap * Math.pow(ndh, shininess) * gate;
+          specAdd = 255 * specStrength * specMap * Math.pow(ndh, shininess) * gate * strength;
         }
 
         const p = i * 4;
-        out[p]     = frameData[p]     * shade + specAdd;
-        out[p + 1] = frameData[p + 1] * shade + specAdd;
-        out[p + 2] = frameData[p + 2] * shade + specAdd;
+        if (oldShade) {
+          // Shading-ratio relight: photo × (newShade / oldShade). Where the
+          // new light matches the old, ratio ≈ 1 and the photo passes
+          // through untouched — photographic realism is the baseline.
+          const r0 = Math.min(Math.max(shade / oldShade[i * 3],     0.25), 4);
+          const r1 = Math.min(Math.max(shade / oldShade[i * 3 + 1], 0.25), 4);
+          const r2 = Math.min(Math.max(shade / oldShade[i * 3 + 2], 0.25), 4);
+          out[p]     = frameData[p]     * (1 + (r0 - 1) * strength) + specAdd;
+          out[p + 1] = frameData[p + 1] * (1 + (r1 - 1) * strength) + specAdd;
+          out[p + 2] = frameData[p + 2] * (1 + (r2 - 1) * strength) + specAdd;
+        } else {
+          // No shading map (old decomposition): direct multiply fallback.
+          out[p]     = frameData[p]     * shade + specAdd;
+          out[p + 1] = frameData[p + 1] * shade + specAdd;
+          out[p + 2] = frameData[p + 2] * shade + specAdd;
+        }
         out[p + 3] = frameData[p + 3];
       }
     }
@@ -2659,10 +2713,10 @@ sharp predict -i your_image.jpg -o output/</pre>
     depth = boxBlur(depth, width, height, depthSmoothR);
     depth = boxBlur(depth, width, height, depthSmoothR);
 
-    // Relight inputs: blend albedo into the source (shading-free base) and
-    // scale the specular map to a luminance array. Both no-ops without a
-    // decomposition or with relight disabled.
-    let srcForBlur = scaledSrc.data;
+    // Relight inputs. The ORIGINAL photo stays the base image — relighting
+    // works by shading ratio (newShade / oldShade), so where the new light
+    // matches the old the photo passes through untouched. No albedo blending.
+    const srcForBlur = scaledSrc.data;
     let scaledSpec = null;
     if (PARAMS.relightEnabled && albedoImageData) {
       const scaleImg = (imgData) => {
@@ -2675,14 +2729,18 @@ sharp predict -i your_image.jpg -o output/</pre>
         sctx.drawImage(c, 0, 0, width, height);
         return sctx.getImageData(0, 0, width, height);
       };
-      const alb = scaleImg(albedoImageData).data;
-      const blend = PARAMS.albedoBlend;
-      srcForBlur = new Uint8ClampedArray(scaledSrc.data.length);
-      for (let i = 0; i < srcForBlur.length; i += 4) {
-        srcForBlur[i]     = scaledSrc.data[i]     * (1 - blend) + alb[i]     * blend;
-        srcForBlur[i + 1] = scaledSrc.data[i + 1] * (1 - blend) + alb[i + 1] * blend;
-        srcForBlur[i + 2] = scaledSrc.data[i + 2] * (1 - blend) + alb[i + 2] * blend;
-        srcForBlur[i + 3] = 255;
+      // Original shading map, per-channel mean-normalized so ratios center
+      // on 1 (overall exposure preserved; colored light casts neutralized).
+      scaledRelightShade = null;
+      if (shadingImageData) {
+        const sh = scaleImg(shadingImageData).data;
+        const arr = new Float32Array(width * height * 3);
+        for (let i = 0; i < width * height; i++) {
+          arr[i * 3]     = Math.max(sh[i * 4]     / 255 / shadingMean[0], 0.25);
+          arr[i * 3 + 1] = Math.max(sh[i * 4 + 1] / 255 / shadingMean[1], 0.25);
+          arr[i * 3 + 2] = Math.max(sh[i * 4 + 2] / 255 / shadingMean[2], 0.25);
+        }
+        scaledRelightShade = { width, height, data: arr };
       }
       if (specularImageData) {
         const sp = scaleImg(specularImageData).data;

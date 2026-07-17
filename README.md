@@ -73,12 +73,22 @@ and parallax are synced by construction.
 ### How it works
 
 ```
-photo ──► companion /intrinsic ──► albedo (shading-free colors) + specular map
-                                   + surface normal map (Marigold-Normals)
+photo ──► companion /intrinsic ──► oldShading + specular + normal map (+ albedo for the pane)
 photo ──► Generate Depth        ──► depth (parallax/warp geometry only)
 each frame t ∈ [-1,1]:  camera offset = f(t)   AND   light azimuth = offset + swing·t
-                        frame = blend(photo, albedo) × shading(normals, light) + specular glint
+                        frame = photo × (newShading(normals, light) / oldShading) + specular glint
 ```
+
+The core relight equation is a **shading ratio**, not a repaint: the photo is
+decomposed as `I = Albedo × Shading + Residual`, so `photo / oldShading` is
+the full-resolution albedo and multiplying by the synthesized `newShading`
+relights it — in one step, per pixel. Where the new light matches the old,
+the ratio is ≈1 and the photo passes through untouched, so photographic
+realism is the baseline and only the light *changes*. (The earlier design
+multiplied synthetic shading over the 768px albedo image, which flattened
+detail and looked CG.) The old shading is mean-normalized per channel so
+overall exposure is preserved and colored light casts are neutralized;
+ratios are clamped to [0.25, 4].
 
 The decomposition uses **Marigold-IID (Lighting)** (`prs-eth/
 marigold-iid-lighting-v1-1`, CreativeML OpenRAIL++-M license) via the
@@ -113,16 +123,16 @@ Relighting works in **both** 2D depth-map modes and splat mode.
 2. Load a photo, click **Generate Depth**, then **Decompose Lighting (Marigold)** (~10s warm; the first click downloads/loads models)
 3. The **Relight** folder unlocks, enabled by default — tune in the live preview
 
-**Splat mode — order matters:**
+**Splat mode:**
 
-1. Load a photo and click **Decompose Lighting (Marigold)** FIRST
-2. Then click **Generate Splat (from albedo)** — the button relabels once a
-   decomposition exists, and the splat is built from the shading-free albedo
-   instead of the photo. (A splat generated *before* decomposing still has the
-   photo's baked lighting; just regenerate it.)
-3. Every rendered frame passes through the compositor shader: normal-map
-   shading + specular glints, light azimuth locked to the camera swing, flash
-   stacked on top. The splat provides parallax; the shader repaints the light.
+1. Load a photo, click **Decompose Lighting (Marigold)** and **Generate
+   Splat (ml-sharp)** — in either order; the splat is always built from the
+   original photo, and the shading ratio in the compositor removes the baked
+   light and applies the new one in the same step.
+2. Every rendered frame passes through the compositor shader: shading-ratio
+   relight (normal-map shading ÷ original shading, both screen-aligned) +
+   specular glints, light azimuth locked to the camera swing, flash stacked
+   on top. The splat provides parallax; the shader redistributes the light.
 
 The pane buttons **[depth] [albedo] [spec] [normals]** switch the preview pane
 between the depth map and the decomposition components for sanity-checking.
@@ -137,7 +147,7 @@ between the depth map and the decomposition components for sanity-checking.
 | **ambient** | Shadow depth floor — higher = flatter, softer lighting. | Constant term in `shade = ambient + (1-ambient)·max(n·l, 0)`. |
 | **relief** | How strongly surfaces respond to the light angle. | Gain on the predicted normal's x/y before renormalizing (default 3 = neutral); for the depth-gradient fallback, scale on the gradients. |
 | **specular** / **shininess** | Glint strength and tightness on shiny surfaces. | Blinn-Phong term masked by the Marigold specular (residual) map. |
-| **albedo blend** | 0 = original photo (original shadows kept), 1 = full albedo (shadows fully removed). ~0.8 keeps some photographic texture. | Linear mix of source and albedo before shading. |
+| **strength** | 0 = original photo untouched, 1 = full relight (original shadows removed, new light applied). | Blend toward the shading ratio: `pixel × (1 + (newShade/oldShade − 1)·strength)`. |
 
 Relight and Flash **stack** in both 2D and splat modes: relight shapes the
 surfaces per-frame, then the flash blowout/vignette applies on top like a
