@@ -399,6 +399,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       <button class="upload-btn" id="companionBtn" style="display:none" onclick="generateSplatViaCompanion()">
         <span class="label-text">Generate Splat (ml-sharp)</span>
       </button>
+      <button class="upload-btn" id="intrinsicBtn" style="display:none" onclick="decomposeViaCompanion()">
+        <span class="label-text">Decompose Lighting (IntrinsicAnything)</span>
+      </button>
     </div>
 
     <div id="tweakpane-container"></div>
@@ -452,11 +455,23 @@ sharp predict -i your_image.jpg -o output/</pre>
     flashFalloff: 8.0,
     flashWarmth: 0.3,
     flashVignette: 1.0,
+    relightEnabled: false,
+    lightSwing: 30,
+    lightOffset: 0,
+    lightElev: 30,
+    relightAmbient: 0.35,
+    normalStrength: 2.0,
+    specStrength: 0.5,
+    shininess: 24,
+    albedoBlend: 0.8,
+    intrinsicHQ: false,
   };
 
   // ─── STATE ──────────────────────────────────────────────────────────────────
   let srcImageData = null;
   let srcFile = null;
+  let albedoImageData = null;   // IntrinsicAnything decomposition (source res)
+  let specularImageData = null;
   let activeDepthSource = null;
   let blueNoise = null;
   let gifBlobUrl = null;
@@ -469,6 +484,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   let depthFolder = null;
   let splatFolder = null;
   let flashFolder = null;
+  let relightFolder = null;
 
   // ─── BLUE NOISE LOADER ──────────────────────────────────────────────────────
   (async function loadBlueNoise() {
@@ -597,6 +613,44 @@ sharp predict -i your_image.jpg -o output/</pre>
       min: -1.0, max: 1.0, step: 0.05,
     });
 
+    // ── Relight (hidden until an intrinsic decomposition is loaded) ──
+    relightFolder = pane.addFolder({ title: 'Relight' });
+    relightFolder.hidden = true;
+
+    relightFolder.addBinding(PARAMS, 'relightEnabled', { label: 'enabled' });
+    relightFolder.addBinding(PARAMS, 'lightSwing', {
+      label: 'light swing °',
+      min: 0, max: 90, step: 1,
+    });
+    relightFolder.addBinding(PARAMS, 'lightOffset', {
+      label: 'light offset °',
+      min: -90, max: 90, step: 1,
+    });
+    relightFolder.addBinding(PARAMS, 'lightElev', {
+      label: 'light elevation °',
+      min: -60, max: 80, step: 1,
+    });
+    relightFolder.addBinding(PARAMS, 'relightAmbient', {
+      label: 'ambient',
+      min: 0, max: 1, step: 0.01,
+    });
+    relightFolder.addBinding(PARAMS, 'normalStrength', {
+      label: 'relief',
+      min: 0.2, max: 8, step: 0.1,
+    });
+    relightFolder.addBinding(PARAMS, 'specStrength', {
+      label: 'specular',
+      min: 0, max: 2, step: 0.05,
+    });
+    relightFolder.addBinding(PARAMS, 'shininess', {
+      label: 'shininess',
+      min: 2, max: 128, step: 1,
+    });
+    relightFolder.addBinding(PARAMS, 'albedoBlend', {
+      label: 'albedo blend',
+      min: 0, max: 1, step: 0.05,
+    });
+
     // ── Optics (always visible) ──
     const opticsFolder = pane.addFolder({ title: 'Optics' });
 
@@ -710,16 +764,22 @@ sharp predict -i your_image.jpg -o output/</pre>
 
   // Shared 2D frame synthesis for depth-map sources. t is the normalized
   // viewpoint offset in [-1, 1].
-  async function captureDepthMapFrame(t, mode, params, scaledSrc, scaledDepth) {
+  async function captureDepthMapFrame(t, mode, params, scaledSrc, scaledDepth, scaledSpec) {
     const xOffset = params.baseline * t;
     const width = scaledSrc.width;
     const height = scaledSrc.height;
     let colorData;
 
-    // Apply the flash to the source BEFORE warping so the lighting moves with
-    // the subject; lighting the warped frame with the unwarped depth map tears
-    // bright/dark fringes at depth edges as the view swings.
-    const litSrc = applyFlash2D(scaledSrc.data, scaledDepth, width, height);
+    // Apply lighting to the source BEFORE warping so it moves with the
+    // subject; lighting the warped frame with the unwarped depth map tears
+    // bright/dark fringes at depth edges as the view swings. Relight (light
+    // direction synced to t) takes precedence over the static flash.
+    let litSrc;
+    if (params.relightEnabled && albedoImageData) {
+      litSrc = applyRelight2D(scaledSrc.data, scaledSpec || null, scaledDepth, t, width, height);
+    } else {
+      litSrc = applyFlash2D(scaledSrc.data, scaledDepth, width, height);
+    }
 
     if (mode === 'orbit') {
       colorData = generateFrameOrbit(litSrc, scaledDepth, xOffset, width, height);
@@ -1361,6 +1421,10 @@ sharp predict -i your_image.jpg -o output/</pre>
         disposeSplat();
         activeDepthSource = null;
         clearDepthPane();
+        albedoImageData = null;
+        specularImageData = null;
+        PARAMS.relightEnabled = false;
+        if (relightFolder) relightFolder.hidden = true;
         if (splatFolder) splatFolder.hidden = true;
         if (flashFolder) flashFolder.hidden = false;
         if (depthFolder) depthFolder.hidden = true;
@@ -1494,7 +1558,8 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (info.ok) {
         companionAvailable = true;
         document.getElementById('companionBtn').style.display = '';
-        console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats enabled');
+        if (info.intrinsic) document.getElementById('intrinsicBtn').style.display = '';
+        console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats' + (info.intrinsic ? ' + IntrinsicAnything' : '') + ' enabled');
       }
     } catch (e) {
       // companion not running \u2014 button stays hidden, depth uses in-browser model
@@ -1550,6 +1615,58 @@ sharp predict -i your_image.jpg -o output/</pre>
       companionBusy = false;
       btn.disabled = false;
       btn.querySelector('.label-text').textContent = 'Generate Splat (ml-sharp)';
+    }
+  };
+
+  // Companion IntrinsicAnything: decompose the source photo into albedo +
+  // specular maps for the Relight system. Slow (diffusion, ~30-90s on GPU).
+  window.decomposeViaCompanion = async function() {
+    if (!srcFile || companionBusy) {
+      if (!srcFile) setStatus('load a source image first', 'error');
+      return;
+    }
+    companionBusy = true;
+    const btn = document.getElementById('intrinsicBtn');
+    btn.disabled = true;
+    btn.querySelector('.label-text').textContent = 'Decomposing... (~1-2 min)';
+    setStatus('decomposing lighting (IntrinsicAnything)...', 'working');
+    try {
+      const resp = await fetch(COMPANION_URL + '/intrinsic' + (PARAMS.intrinsicHQ ? '?hq=1' : ''), {
+        method: 'POST',
+        headers: { 'Content-Type': srcFile.type || 'image/jpeg' },
+        body: srcFile,
+      });
+      if (!resp.ok) {
+        let msg = 'companion error ' + resp.status;
+        try { msg = (await resp.json()).error || msg; } catch (e2) {}
+        throw new Error(msg);
+      }
+      const data = await resp.json();
+      const toImageData = async (b64) => {
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        const bmp = await createImageBitmap(new Blob([bytes], { type: 'image/png' }));
+        const c = document.createElement('canvas');
+        c.width = srcImageData.width;
+        c.height = srcImageData.height;
+        const ctx = c.getContext('2d');
+        ctx.drawImage(bmp, 0, 0, c.width, c.height);
+        return ctx.getImageData(0, 0, c.width, c.height);
+      };
+      albedoImageData = await toImageData(data.albedo);
+      specularImageData = await toImageData(data.specular);
+      if (relightFolder) relightFolder.hidden = false;
+      PARAMS.relightEnabled = true;
+      setStatus('decomposition ready \u2014 Relight controls unlocked', 'done');
+      schedulePreviewRebuild();
+    } catch (err) {
+      console.error('intrinsic decomposition failed:', err);
+      setStatus('decomposition failed: ' + err.message, 'error');
+    } finally {
+      companionBusy = false;
+      btn.disabled = false;
+      btn.querySelector('.label-text').textContent = 'Decompose Lighting (IntrinsicAnything)';
     }
   };
 
@@ -1769,6 +1886,67 @@ sharp predict -i your_image.jpg -o output/</pre>
         out[p]     = frameData[p]     * exposure * (1 + wAmt);
         out[p + 1] = frameData[p + 1] * exposure;
         out[p + 2] = frameData[p + 2] * exposure * (1 - wAmt);
+        out[p + 3] = frameData[p + 3];
+      }
+    }
+    return out;
+  }
+
+  // ─── ROTATION-SYNCED RELIGHT ───────────────────────────────────────────────
+  // Physically-inspired shading of the (albedo-blended) source: normals come
+  // from the depth map's gradients, the light azimuth is a function of the
+  // same view offset t that drives the camera, so lighting and parallax are
+  // synced by construction. spec is a luminance map (IntrinsicAnything
+  // specular output) or null.
+  function applyRelight2D(frameData, spec, depth, t, width, height) {
+    if (!PARAMS.relightEnabled) return frameData;
+
+    const az = (PARAMS.lightOffset + PARAMS.lightSwing * t) * Math.PI / 180;
+    const el = PARAMS.lightElev * Math.PI / 180;
+    // Camera looks down -z onto the image plane; depth is bright = near (+z).
+    const lx = Math.sin(az) * Math.cos(el);
+    const ly = Math.sin(el);
+    const lz = Math.cos(az) * Math.cos(el);
+    // Half vector for Blinn-Phong with view = (0,0,1)
+    let hx = lx, hy = ly, hz = lz + 1;
+    const hn = Math.hypot(hx, hy, hz);
+    hx /= hn; hy /= hn; hz /= hn;
+
+    const ambient = PARAMS.relightAmbient;
+    const k = PARAMS.normalStrength * Math.min(width, height) * 0.05;
+    const specStrength = PARAMS.specStrength;
+    const shininess = PARAMS.shininess;
+
+    const out = new Uint8ClampedArray(frameData.length);
+    for (let y = 0; y < height; y++) {
+      const y0 = Math.max(y - 1, 0) * width;
+      const y1 = Math.min(y + 1, height - 1) * width;
+      for (let x = 0; x < width; x++) {
+        const i = y * width + x;
+        const xm = Math.max(x - 1, 0);
+        const xp = Math.min(x + 1, width - 1);
+        // Screen-space depth gradients -> surface normal. Image y grows
+        // downward but world y grows upward, hence the sign flip on ny.
+        const dzdx = (depth[y * width + xp] - depth[y * width + xm]) * 0.5 * k;
+        const dzdy = (depth[y1 + x] - depth[y0 + x]) * 0.5 * k;
+        let nx = -dzdx, ny = dzdy, nz = 1;
+        const nn = Math.hypot(nx, ny, nz);
+        nx /= nn; ny /= nn; nz /= nn;
+
+        const diff = Math.max(nx * lx + ny * ly + nz * lz, 0);
+        const shade = ambient + (1 - ambient) * diff;
+
+        let specAdd = 0;
+        if (specStrength > 0) {
+          const ndh = Math.max(nx * hx + ny * hy + nz * hz, 0);
+          const specMap = spec ? spec[i] : 0.25;
+          specAdd = 255 * specStrength * specMap * Math.pow(ndh, shininess);
+        }
+
+        const p = i * 4;
+        out[p]     = frameData[p]     * shade + specAdd;
+        out[p + 1] = frameData[p + 1] * shade + specAdd;
+        out[p + 2] = frameData[p + 2] * shade + specAdd;
         out[p + 3] = frameData[p + 3];
       }
     }
@@ -2217,9 +2395,43 @@ sharp predict -i your_image.jpg -o output/</pre>
     depth = boxBlur(depth, width, height, depthSmoothR);
     depth = boxBlur(depth, width, height, depthSmoothR);
 
+    // Relight inputs: blend albedo into the source (shading-free base) and
+    // scale the specular map to a luminance array. Both no-ops without a
+    // decomposition or with relight disabled.
+    let srcForBlur = scaledSrc.data;
+    let scaledSpec = null;
+    if (PARAMS.relightEnabled && albedoImageData) {
+      const scaleImg = (imgData) => {
+        const c = document.createElement('canvas');
+        c.width = imgData.width; c.height = imgData.height;
+        c.getContext('2d').putImageData(imgData, 0, 0);
+        const s = document.createElement('canvas');
+        s.width = width; s.height = height;
+        const sctx = s.getContext('2d');
+        sctx.drawImage(c, 0, 0, width, height);
+        return sctx.getImageData(0, 0, width, height);
+      };
+      const alb = scaleImg(albedoImageData).data;
+      const blend = PARAMS.albedoBlend;
+      srcForBlur = new Uint8ClampedArray(scaledSrc.data.length);
+      for (let i = 0; i < srcForBlur.length; i += 4) {
+        srcForBlur[i]     = scaledSrc.data[i]     * (1 - blend) + alb[i]     * blend;
+        srcForBlur[i + 1] = scaledSrc.data[i + 1] * (1 - blend) + alb[i + 1] * blend;
+        srcForBlur[i + 2] = scaledSrc.data[i + 2] * (1 - blend) + alb[i + 2] * blend;
+        srcForBlur[i + 3] = 255;
+      }
+      if (specularImageData) {
+        const sp = scaleImg(specularImageData).data;
+        scaledSpec = new Float32Array(width * height);
+        for (let i = 0; i < width * height; i++) {
+          scaledSpec[i] = (0.299 * sp[i * 4] + 0.587 * sp[i * 4 + 1] + 0.114 * sp[i * 4 + 2]) / 255;
+        }
+      }
+    }
+
     // Pre-blur source proportional to depth (background blurs, foreground stays sharp)
-    const blurredSrcData = buildDepthBlurredSrc(scaledSrc.data, depth, width, height, cocScale);
-    return { width, height, depth, blurredSrc: { data: blurredSrcData, width, height } };
+    const blurredSrcData = buildDepthBlurredSrc(srcForBlur, depth, width, height, cocScale);
+    return { width, height, depth, scaledSpec, blurredSrc: { data: blurredSrcData, width, height } };
   }
 
   // ─── LIVE PREVIEW (2D depth-map modes only) ────────────────────────────────
@@ -2265,12 +2477,12 @@ sharp predict -i your_image.jpg -o output/</pre>
     const cocScale = PARAMS.bokehCoc * outScale;
     const wrapRadius = PARAMS.lightWrap * outScale;
 
-    const { width, height, depth, blurredSrc } = prepareScaledInputs(PREVIEW_WIDTH, cocScale);
+    const { width, height, depth, scaledSpec, blurredSrc } = prepareScaledInputs(PREVIEW_WIDTH, cocScale);
     const { positions, seq } = buildViewSequence();
     const viewFrames = [];
     for (const t of positions) {
       if (gen !== previewGeneration || activeDepthSource !== forSource) return;
-      const { colorData } = await captureDepthMapFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
+      const { colorData } = await captureDepthMapFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth, scaledSpec);
       let px = applyLightWrap(colorData, depth, wrapRadius, width, height);
       px = circularDiscBokeh(px, depth, PARAMS.focusDist, cocScale, width, height);
       px = applyChromaticAberration(px, PARAMS.chromaticAberr, t, width, height);
@@ -2319,11 +2531,11 @@ sharp predict -i your_image.jpg -o output/</pre>
       generateBtn.disabled = false;
       return;
     }
-    let width, height, depth, blurredSrc;
+    let width, height, depth, blurredSrc, scaledSpec;
     let origW = 800, origH = 480;
 
     if (!isSplat3D) {
-      ({ width, height, depth, blurredSrc } = prepareScaledInputs(targetWidth, cocScale));
+      ({ width, height, depth, scaledSpec, blurredSrc } = prepareScaledInputs(targetWidth, cocScale));
     } else {
       // For splat: resize to target width for capture, then restore after encoding
       origW = activeDepthSource.renderer ? activeDepthSource.renderer.domElement.width : 800;
@@ -2379,7 +2591,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     for (let v = 0; v < positions.length; v++) {
       const t = positions[v];
       const { colorData, depthArray, width: fw, height: fh } =
-        await activeDepthSource.captureFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth);
+        await activeDepthSource.captureFrame(t, PARAMS.mode, PARAMS, blurredSrc, depth, scaledSpec);
 
       let framePixels = applyLightWrap(colorData, depthArray, wrapRadius, fw, fh);
       framePixels = circularDiscBokeh(framePixels, depthArray, focusDist, cocScale, fw, fh);

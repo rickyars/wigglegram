@@ -10,7 +10,7 @@ A wigglegram (or "wiggle stereoscopy") is an animated GIF that rapidly alternate
 
 1. Open `wigglegram.html` in any modern browser (Chrome, Firefox, Edge, Safari)
 2. Click **Upload Source Image** and pick a photo
-3. Depth is estimated automatically: if the companion server is running (see below) it uses **Depth Anything 3** on your GPU (best quality, ~2s); otherwise it falls back to **Depth Anything V2 Small** in your browser (~25MB model downloads once, then is cached). Luminance depth shows instantly as a placeholder while it runs; click **[clear]** to opt back out.
+3. Click **Generate Depth**: if the companion server is running (see below) it uses **Depth Anything 3** on your GPU (best quality, ~2s); otherwise it falls back to **Depth Anything V2 Small** in your browser (~25MB model downloads once, then is cached). Depth no longer runs automatically on upload, and the old luminance-as-depth placeholder is gone — until a depth source exists, the generate button stays disabled.
 4. (Optional) Click **Upload Depth Source** to supply your own grayscale depth map or a `.ply` gaussian splat instead — or use the companion server for one-click splats (see [Gaussian splats](#gaussian-splats-best-quality) below)
 5. Adjust parameters in the right-hand panel — the **live preview** loops the wiggle as you tune, no encoding needed
 6. Pick an output **format** (gif, or video — mp4/webm, typically ~10× smaller) and click **Generate**
@@ -61,6 +61,85 @@ The SHARP checkpoint (~2.6GB) downloads on first companion start; the DA3 model 
 **Manual alternative:** run `sharp predict -i your_image.jpg -o output/` and upload the resulting `.ply` via the Depth Source button.
 
 ml-sharp PLYs embed the source camera pose; the app uses it to center the wiggle on the photo's optical axis, so at zoom 1.0 the framing matches your photo exactly.
+
+## Relighting (shadows & reflections fix)
+
+Baked-in shadows and specular reflections break the wiggle illusion: the depth
+map assigns those pixels to the surface they appear on, so they move rigidly
+with the surface instead of behaving like light. The Relight system fixes this
+by removing the photo's lighting and re-adding synthetic lighting whose
+direction is driven by the same view offset that drives the camera — lighting
+and parallax are synced by construction.
+
+### How it works
+
+```
+photo ──► companion /intrinsic ──► albedo (shading-free colors) + specular map
+photo ──► Generate Depth        ──► depth ──► per-pixel normals (from gradients)
+each frame t ∈ [-1,1]:  camera offset = f(t)   AND   light azimuth = offset + swing·t
+                        frame = blend(photo, albedo) × shading(normals, light) + specular glint
+```
+
+The decomposition uses **IntrinsicAnything** (ECCV 2024, zju3dv) — two latent
+diffusion models that split a single photo into albedo and specular shading.
+Note the published repo has *no relight function* (the paper's relighting is
+multi-view only); the shading step above is this app's own implementation of
+the paper's rendering equation, with normals derived from the depth map.
+
+### Using it
+
+1. Start the companion server (needs the IntrinsicAnything weights, see setup below)
+2. Load a photo, click **Generate Depth**, then **Decompose Lighting (IntrinsicAnything)** (~30-90s on GPU)
+3. The **Relight** folder unlocks in the panel, enabled by default — tune in the live preview
+
+### Relight parameters
+
+| Parameter | What you'll see | Technical |
+|-----------|----------------|-----------|
+| **light swing °** | How much the light direction sweeps during the wiggle. 0 = static light. | Azimuth range: `az = offset + swing · t`, t is the view offset in [-1,1]. |
+| **light offset °** | Where the light sits at center frame. | Constant azimuth term. |
+| **light elevation °** | Light height: positive = from above. | Elevation angle of the light vector. |
+| **ambient** | Shadow depth floor — higher = flatter, softer lighting. | Constant term in `shade = ambient + (1-ambient)·max(n·l, 0)`. |
+| **relief** | How strongly surfaces respond to the light angle. | Scale on depth gradients before normal construction. |
+| **specular** / **shininess** | Glint strength and tightness on shiny surfaces. | Blinn-Phong term masked by the IntrinsicAnything specular map. |
+| **albedo blend** | 0 = original photo (original shadows kept), 1 = full albedo (shadows fully removed). ~0.8 keeps some photographic texture. | Linear mix of source and albedo before shading. |
+
+When Relight is enabled it replaces the Flash effect for 2D depth-map modes
+(a camera-locked flash is just `swing ≈ 0`, high `relief`, light at 0° elevation).
+
+### Companion setup for relighting
+
+One-time, in the companion Python env (`conda activate comfyui`):
+
+```bash
+# code (the HF Space layout is what the companion imports)
+hf download LittleFrog/IntrinsicAnything --repo-type space --local-dir IntrinsicAnythingSpace
+# weights (~15GB total, two diffusion checkpoints)
+hf download LittleFrog/IntrinsicAnything --local-dir IntrinsicAnythingSpace/weights
+# deps not already in the env
+pip install pytorch_lightning "clip @ git+https://github.com/openai/CLIP.git" ftfy regex
+```
+
+Then patch `IntrinsicAnythingSpace/models/ldm/util.py` to make the `carvekit`
+import lazy (move `from carvekit.api.high import HiInterface` inside
+`create_carvekit_interface`) — carvekit is only used for object masking, which
+the companion never does. This patch is already applied in this checkout.
+
+Restart the companion; `/health` now reports `"intrinsic": true` and the
+Decompose button appears in the app. The endpoint is `POST /intrinsic`
+(query params: `?hq=1` for a tiled high-res second pass, `?steps=N` DDIM steps,
+default 50), returning `{"albedo": <base64 PNG>, "specular": <base64 PNG>}`.
+
+### Current limitations
+
+- **2D depth-map modes only** — splat mode still uses the Flash effect. (Planned:
+  build the splat from the albedo image and shade it in the splat compositor.)
+- **Mirror-content reflections are not fixed** — intrinsic decomposition removes
+  specular sheen and shading, but a scene reflected in a mirror/window is
+  content, not shading. That needs a layered renderer with mirrored depth
+  (future milestone).
+- The first Decompose click after companion start loads both diffusion models
+  (~30s extra).
 
 ## Parameters Reference
 
@@ -122,7 +201,7 @@ Mode 5 (Splat Wiggle) uses a WebGL renderer and captures frames directly from th
 
 ## Producing Depth Maps
 
-By default the tool uses image luminance as a rough depth proxy (bright = near). For much better results, supply a proper depth map — a grayscale PNG where **bright = near, dark = far**.
+The tool needs a proper depth map — a grayscale PNG where **bright = near, dark = far** — either generated in-app (Generate Depth) or supplied via the Depth Source button.
 
 ### Depth Anything V2
 

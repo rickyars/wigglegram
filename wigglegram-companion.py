@@ -14,6 +14,11 @@ Endpoints (127.0.0.1:8765):
     POST /depth    -> body: image bytes; response: grayscale PNG depth map
                       (Depth Anything 3 MONO-LARGE, bright = near; lazy-loaded
                       on first call, then kept warm)
+    POST /intrinsic -> body: image bytes; response JSON:
+                      {"albedo": <base64 PNG>, "specular": <base64 PNG>}
+                      (IntrinsicAnything diffusion decomposition; lazy-loaded.
+                      Query params: ?hq=1 for tiled high-res pass, ?steps=N
+                      for DDIM steps, default 50.)
 """
 import http.server
 import json
@@ -83,6 +88,42 @@ def run_depth(image_bytes: bytes, suffix: str) -> bytes:
         return buf.getvalue()
 
 
+INTRINSIC_RUNNER = None
+
+
+def intrinsic_supported() -> bool:
+    try:
+        import intrinsic_runner
+        return intrinsic_runner.weights_available()
+    except Exception:  # noqa: BLE001
+        return False
+
+
+def run_intrinsic(image_bytes: bytes, hq: bool, steps: int) -> bytes:
+    global INTRINSIC_RUNNER
+    if INTRINSIC_RUNNER is None:
+        import intrinsic_runner
+        INTRINSIC_RUNNER = intrinsic_runner
+    import base64
+    import io as std_io
+
+    import numpy as np
+    from PIL import Image
+
+    img = np.array(Image.open(std_io.BytesIO(image_bytes)).convert("RGB"))
+
+    def to_b64(arr):
+        buf = std_io.BytesIO()
+        Image.fromarray(arr).save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode()
+
+    LOGGER.info("intrinsic: albedo pass (hq=%s, steps=%d)...", hq, steps)
+    albedo = INTRINSIC_RUNNER.decompose(img, kind="albedo", hq=hq, ddim_steps=steps)
+    LOGGER.info("intrinsic: specular pass...")
+    specular = INTRINSIC_RUNNER.decompose(img, kind="specular", hq=hq, ddim_steps=steps)
+    return json.dumps({"albedo": to_b64(albedo), "specular": to_b64(specular)}).encode()
+
+
 def run_predict(image_bytes: bytes, suffix: str) -> bytes:
     with tempfile.TemporaryDirectory() as tmp:
         img_path = Path(tmp) / ("input" + suffix)
@@ -111,7 +152,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_GET(self):
         if self.path == "/health":
-            body = json.dumps({"ok": True, "device": DEVICE}).encode()
+            body = json.dumps({"ok": True, "device": DEVICE,
+                               "intrinsic": intrinsic_supported()}).encode()
             self.send_response(200)
             self._cors()
             self.send_header("Content-Type", "application/json")
@@ -125,7 +167,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def do_POST(self):
         route = self.path.split("?")[0]
-        if route not in ("/predict", "/depth"):
+        if route not in ("/predict", "/depth", "/intrinsic"):
             self.send_response(404)
             self._cors()
             self.end_headers()
@@ -138,6 +180,13 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if route == "/depth":
                 body = run_depth(data, suffix)
                 mime = "image/png"
+            elif route == "/intrinsic":
+                from urllib.parse import parse_qs, urlparse
+                q = parse_qs(urlparse(self.path).query)
+                hq = q.get("hq", ["0"])[0] in ("1", "true")
+                steps = int(q.get("steps", ["50"])[0])
+                body = run_intrinsic(data, hq, steps)
+                mime = "application/json"
             else:
                 body = run_predict(data, suffix)
                 mime = "application/octet-stream"
