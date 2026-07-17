@@ -338,6 +338,7 @@
         <div class="preview-label">
           <span id="depthPaneLabel">depth (none)</span>
           <div class="splat-mode-toggle" id="intrinsicToggle">
+            <button class="splat-mode-btn active" id="paneDepthBtn">[depth]</button>
             <button class="splat-mode-btn" id="paneAlbedoBtn">[albedo]</button>
             <button class="splat-mode-btn" id="paneSpecBtn">[spec]</button>
             <button class="splat-mode-btn" id="paneNormalsBtn">[normals]</button>
@@ -1481,6 +1482,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   document.getElementById('paneAlbedoBtn').addEventListener('click', () => togglePaneView('albedo'));
   document.getElementById('paneSpecBtn').addEventListener('click', () => togglePaneView('specular'));
   document.getElementById('paneNormalsBtn').addEventListener('click', () => togglePaneView('normals'));
+  document.getElementById('paneDepthBtn').addEventListener('click', () => togglePaneView('depth'));
   console.log('[wigglegram] event listeners registered');
 
   document.getElementById('depthSourceInput').addEventListener('change', (e) => {
@@ -1556,6 +1558,8 @@ sharp predict -i your_image.jpg -o output/</pre>
         document.getElementById('intrinsicToggle').classList.remove('visible');
         document.getElementById('paneAlbedoBtn').classList.remove('active');
         document.getElementById('paneSpecBtn').classList.remove('active');
+        document.getElementById('paneNormalsBtn').classList.remove('active');
+        document.getElementById('paneDepthBtn').classList.add('active');
         const splatLbl = document.getElementById('companionBtn').querySelector('.label-text');
         if (splatLbl) splatLbl.textContent = 'Generate Splat (ml-sharp)';
         if (splatFolder) splatFolder.hidden = true;
@@ -1968,12 +1972,15 @@ sharp predict -i your_image.jpg -o output/</pre>
   }
 
   function togglePaneView(kind) {
-    const img = kind === 'albedo' ? albedoImageData
+    const img = kind === 'depth' ? null
+              : kind === 'albedo' ? albedoImageData
               : kind === 'specular' ? specularImageData
               : buildNormalsView();
-    if (!img) return;
+    if (!img && kind !== 'depth') return;
+    // Clicking the active view (or [depth]) returns to the depth map.
     paneView = (paneView === kind) ? 'depth' : kind;
     const canvas = document.getElementById('depthCanvas');
+    document.getElementById('paneDepthBtn').classList.toggle('active', paneView === 'depth');
     document.getElementById('paneAlbedoBtn').classList.toggle('active', paneView === 'albedo');
     document.getElementById('paneSpecBtn').classList.toggle('active', paneView === 'specular');
     document.getElementById('paneNormalsBtn').classList.toggle('active', paneView === 'normals');
