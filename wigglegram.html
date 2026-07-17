@@ -1030,17 +1030,25 @@ sharp predict -i your_image.jpg -o output/</pre>
             vec3 rgb = color.rgb;
 
             if (relightEnabled) {
-              // Geometric normals from the splat's own depth buffer — much
-              // finer than any 2D depth map. Screen x/y, z toward camera.
-              float dC = linearizeDepth(texture2D(tDepth, vUv).x);
-              float dX = linearizeDepth(texture2D(tDepth, vUv + vec2(texelSize.x * 2.0, 0.0)).x);
-              float dY = linearizeDepth(texture2D(tDepth, vUv + vec2(0.0, texelSize.y * 2.0)).x);
-              vec3 n = normalize(vec3((dX - dC) * reliefScale, (dY - dC) * reliefScale, 1.0));
+              // Geometric normals from the splat's own depth buffer. Central
+              // differences over wide taps: splat depth is noisy, and forward
+              // differences turned that noise into randomly-tilted normals
+              // that crushed the whole frame dark and sprayed specular.
+              float dL = linearizeDepth(texture2D(tDepth, vUv - vec2(texelSize.x * 3.0, 0.0)).x);
+              float dR = linearizeDepth(texture2D(tDepth, vUv + vec2(texelSize.x * 3.0, 0.0)).x);
+              float dD = linearizeDepth(texture2D(tDepth, vUv - vec2(0.0, texelSize.y * 3.0)).x);
+              float dU = linearizeDepth(texture2D(tDepth, vUv + vec2(0.0, texelSize.y * 3.0)).x);
+              vec3 n = normalize(vec3((dR - dL) * reliefScale, (dU - dD) * reliefScale, 1.0));
               float diff = max(dot(n, lightDir), 0.0);
               float shade = relightAmbient + (1.0 - relightAmbient) * diff;
+              // Normalize so a camera-facing surface keeps its brightness at
+              // every light angle — the wiggle modulates shape, not exposure.
+              float shade0 = relightAmbient + (1.0 - relightAmbient) * max(lightDir.z, 0.0);
+              shade /= max(shade0, 0.25);
               vec3 h = normalize(lightDir + vec3(0.0, 0.0, 1.0));
               float specMask = hasSpec ? dot(texture2D(tSpec, vUv).rgb, vec3(0.299, 0.587, 0.114)) : 0.25;
-              float spec = specStrength * specMask * pow(max(dot(n, h), 0.0), shininess);
+              // Gate specular by diffuse so shadowed/noisy areas don't haze
+              float spec = specStrength * specMask * pow(max(dot(n, h), 0.0), shininess) * smoothstep(0.0, 0.2, diff);
               rgb = rgb * shade + spec;
             }
 
@@ -1113,11 +1121,11 @@ sharp predict -i your_image.jpg -o output/</pre>
           Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
         material.uniforms.relightAmbient.value = PARAMS.relightAmbient;
         // Convert the relief slider into a geometric slope scale: depth
-        // gradient is taken over 2 texels, each spanning worldPerTexel units.
+        // gradient is taken centrally over 6 texels, each worldPerTexel wide.
         const fovRad = (this.camera.fov || 45) * Math.PI / 180;
         const dist = (this._autoFitDist || 3.0) * PARAMS.splatZoom;
         const worldPerTexel = 2 * Math.tan(fovRad / 2) * dist / h;
-        material.uniforms.reliefScale.value = PARAMS.normalStrength * 0.33 / (worldPerTexel * 2);
+        material.uniforms.reliefScale.value = PARAMS.normalStrength * 0.33 / (worldPerTexel * 6);
         material.uniforms.specStrength.value = PARAMS.specStrength;
         material.uniforms.shininess.value = PARAMS.shininess;
         if (specularImageData && !this._specTexture) {
@@ -2121,13 +2129,17 @@ sharp predict -i your_image.jpg -o output/</pre>
         nx /= nn; ny /= nn; nz /= nn;
 
         const diff = Math.max(nx * lx + ny * ly + nz * lz, 0);
-        const shade = ambient + (1 - ambient) * diff;
+        let shade = ambient + (1 - ambient) * diff;
+        // Camera-facing surfaces keep their brightness at every light angle
+        const shade0 = ambient + (1 - ambient) * Math.max(lz, 0);
+        shade /= Math.max(shade0, 0.25);
 
         let specAdd = 0;
         if (specStrength > 0) {
           const ndh = Math.max(nx * hx + ny * hy + nz * hz, 0);
           const specMap = spec ? spec[i] : 0.25;
-          specAdd = 255 * specStrength * specMap * Math.pow(ndh, shininess);
+          const gate = Math.min(diff / 0.2, 1);
+          specAdd = 255 * specStrength * specMap * Math.pow(ndh, shininess) * gate;
         }
 
         const p = i * 4;

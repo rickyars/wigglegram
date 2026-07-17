@@ -63,6 +63,22 @@ def offload_models():
     logger.info("IA models offloaded to CPU; VRAM freed.")
 
 
+def reinject_detail(albedo_u8, original_u8, radius=8):
+    """The diffusion decomposition runs at 256px, so the upsampled albedo is
+    mushy. Multiply it by the ORIGINAL photo's high-frequency ratio
+    (orig / blur(orig)): fine detail — faces, hair, fabric weave — comes back
+    from the photo while the albedo keeps its shading-free colors and the
+    low-frequency shading stays removed."""
+    import cv2
+    import numpy as np
+    alb = albedo_u8.astype(np.float32)
+    orig = original_u8.astype(np.float32)
+    k = (2 * radius + 1, 2 * radius + 1)
+    blur_o = cv2.GaussianBlur(orig, k, 0)
+    detail = (orig + 1.0) / (blur_o + 1.0)
+    return np.clip(alb * detail, 0, 255).astype(np.uint8)
+
+
 def decompose(image_rgb_u8, kind="albedo", hq=False, ddim_steps=50):
     """image_rgb_u8: HxWx3 uint8. Returns HxWx3 uint8 at source resolution."""
     model = get_model(kind)
@@ -84,4 +100,6 @@ def decompose(image_rgb_u8, kind="albedo", hq=False, ddim_steps=50):
         from PIL import Image
         out = np.array(Image.fromarray(out).resize(
             (image_rgb_u8.shape[1], image_rgb_u8.shape[0]), Image.LANCZOS))
+    if kind == "albedo":
+        out = reinject_detail(out, image_rgb_u8)
     return out
