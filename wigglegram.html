@@ -456,11 +456,11 @@ sharp predict -i your_image.jpg -o output/</pre>
     flashWarmth: 0.3,
     flashVignette: 1.0,
     relightEnabled: false,
-    lightSwing: 30,
+    lightSwing: 60,
     lightOffset: 0,
-    lightElev: 30,
-    relightAmbient: 0.35,
-    normalStrength: 2.0,
+    lightElev: 20,
+    relightAmbient: 0.25,
+    normalStrength: 3.0,
     specStrength: 0.5,
     shininess: 24,
     albedoBlend: 0.8,
@@ -1348,6 +1348,9 @@ sharp predict -i your_image.jpg -o output/</pre>
   try {
     setupTweakpane();
     console.log('[wigglegram] tweakpane ready');
+    // Debug/testing hooks (params object + preview refresh)
+    window.PARAMS = PARAMS;
+    window.schedulePreviewRebuild = schedulePreviewRebuild;
 
   // ─── FILE UPLOAD HANDLERS ──────────────────────────────────────────────────
   document.getElementById('fileInput').addEventListener('change', (e) => {
@@ -1917,18 +1920,24 @@ sharp predict -i your_image.jpg -o output/</pre>
     const specStrength = PARAMS.specStrength;
     const shininess = PARAMS.shininess;
 
+    // Smooth the depth before taking gradients: 8-bit depth quantization
+    // steps otherwise become visible "topographic" ridges once amplified by
+    // the relief gain. Wider stencil (±2) for the same reason.
+    let nDepth = boxBlur(depth, width, height, 2);
+    nDepth = boxBlur(nDepth, width, height, 2);
+
     const out = new Uint8ClampedArray(frameData.length);
     for (let y = 0; y < height; y++) {
-      const y0 = Math.max(y - 1, 0) * width;
-      const y1 = Math.min(y + 1, height - 1) * width;
+      const y0 = Math.max(y - 2, 0) * width;
+      const y1 = Math.min(y + 2, height - 1) * width;
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
-        const xm = Math.max(x - 1, 0);
-        const xp = Math.min(x + 1, width - 1);
+        const xm = Math.max(x - 2, 0);
+        const xp = Math.min(x + 2, width - 1);
         // Screen-space depth gradients -> surface normal. Image y grows
         // downward but world y grows upward, hence the sign flip on ny.
-        const dzdx = (depth[y * width + xp] - depth[y * width + xm]) * 0.5 * k;
-        const dzdy = (depth[y1 + x] - depth[y0 + x]) * 0.5 * k;
+        const dzdx = (nDepth[y * width + xp] - nDepth[y * width + xm]) * 0.25 * k;
+        const dzdy = (nDepth[y1 + x] - nDepth[y0 + x]) * 0.25 * k;
         let nx = -dzdx, ny = dzdy, nz = 1;
         const nn = Math.hypot(nx, ny, nz);
         nx /= nn; ny /= nn; nz /= nn;
