@@ -1644,9 +1644,13 @@ sharp predict -i your_image.jpg -o output/</pre>
   let companionAvailable = false;
 
   (async function detectCompanion() {
+    // Two attempts with a generous timeout: the companion can be slow to
+    // answer right after startup or while another request holds the GPU.
+    for (let attempt = 0; attempt < 2; attempt++) {
+      if (attempt > 0) await new Promise(r => setTimeout(r, 3000));
     try {
       const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 2000);
+      const timer = setTimeout(() => ctrl.abort(), 6000);
       const resp = await fetch(COMPANION_URL + '/health', { signal: ctrl.signal });
       clearTimeout(timer);
       const info = await resp.json();
@@ -1658,10 +1662,13 @@ sharp predict -i your_image.jpg -o output/</pre>
           document.getElementById('intrinsicHQRow').style.display = 'flex';
         }
         console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats' + (info.intrinsic ? ' + IntrinsicAnything' : '') + ' enabled');
+        return;
       }
     } catch (e) {
-      // companion not running \u2014 button stays hidden, depth uses in-browser model
+      // companion not running (or slow) \u2014 retry once, then stay hidden
     }
+    }
+    console.log('[wigglegram] no companion detected \u2014 using in-browser depth only');
   })();
 
   // Companion DA3 depth: returns ImageData at source resolution, or null

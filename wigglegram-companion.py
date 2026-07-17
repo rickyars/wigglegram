@@ -25,6 +25,7 @@ import json
 import logging
 import sys
 import tempfile
+import threading
 import types
 from pathlib import Path
 
@@ -58,6 +59,9 @@ LOGGER.info("Model ready. Listening on http://%s:%d", HOST, PORT)
 
 
 DA3_MODEL = None
+
+# Serialize GPU work across the threading server's request threads
+GPU_LOCK = threading.Lock()
 
 
 def run_depth(image_bytes: bytes, suffix: str) -> bytes:
@@ -140,6 +144,22 @@ def run_predict(image_bytes: bytes, suffix: str) -> bytes:
 
 
 class Handler(http.server.BaseHTTPRequestHandler):
+    def _send(self, code, body=None, mime="application/json"):
+        """Send a full response, tolerating clients that disconnected midway
+        (closed/refreshed tabs abort the socket -> WinError 10053; that's the
+        client's problem, not ours — log one line instead of a traceback)."""
+        try:
+            self.send_response(code)
+            self._cors()
+            if body is not None:
+                self.send_header("Content-Type", mime)
+                self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if body is not None:
+                self.wfile.write(body)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            LOGGER.info("client disconnected before response completed (%s)", self.path)
+
     def _cors(self):
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
@@ -148,70 +168,51 @@ class Handler(http.server.BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Private-Network", "true")
 
     def do_OPTIONS(self):
-        self.send_response(204)
-        self._cors()
-        self.end_headers()
+        self._send(204)
 
     def do_GET(self):
         if self.path == "/health":
             body = json.dumps({"ok": True, "device": DEVICE,
                                "intrinsic": intrinsic_supported()}).encode()
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            self._send(200, body)
         else:
-            self.send_response(404)
-            self._cors()
-            self.end_headers()
+            self._send(404)
 
     def do_POST(self):
         route = self.path.split("?")[0]
         if route not in ("/predict", "/depth", "/intrinsic"):
-            self.send_response(404)
-            self._cors()
-            self.end_headers()
+            self._send(404)
             return
         try:
             n = int(self.headers.get("Content-Length", 0))
             data = self.rfile.read(n)
             ctype = self.headers.get("Content-Type", "")
             suffix = ".png" if "png" in ctype else ".jpg"
-            if route == "/depth":
-                body = run_depth(data, suffix)
-                mime = "image/png"
-            elif route == "/intrinsic":
-                from urllib.parse import parse_qs, urlparse
-                q = parse_qs(urlparse(self.path).query)
-                hq = q.get("hq", ["0"])[0] in ("1", "true")
-                steps = int(q.get("steps", ["50"])[0])
-                body = run_intrinsic(data, hq, steps)
-                mime = "application/json"
-            else:
-                body = run_predict(data, suffix)
-                mime = "application/octet-stream"
-            self.send_response(200)
-            self._cors()
-            self.send_header("Content-Type", mime)
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            with GPU_LOCK:
+                if route == "/depth":
+                    body = run_depth(data, suffix)
+                    mime = "image/png"
+                elif route == "/intrinsic":
+                    from urllib.parse import parse_qs, urlparse
+                    q = parse_qs(urlparse(self.path).query)
+                    hq = q.get("hq", ["0"])[0] in ("1", "true")
+                    steps = int(q.get("steps", ["50"])[0])
+                    body = run_intrinsic(data, hq, steps)
+                    mime = "application/json"
+                else:
+                    body = run_predict(data, suffix)
+                    mime = "application/octet-stream"
+            self._send(200, body, mime)
             LOGGER.info("%s returned %.1f MB", route, len(body) / 1048576)
         except Exception as e:  # noqa: BLE001
-            LOGGER.exception("predict failed")
-            body = json.dumps({"error": str(e)}).encode()
-            self.send_response(500)
-            self._cors()
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Content-Length", str(len(body)))
-            self.end_headers()
-            self.wfile.write(body)
+            LOGGER.exception("%s failed", route)
+            self._send(500, json.dumps({"error": str(e)}).encode())
 
     def log_message(self, fmt, *args):
         LOGGER.info(fmt, *args)
 
 
 if __name__ == "__main__":
-    http.server.HTTPServer((HOST, PORT), Handler).serve_forever()
+    # Threading server: a slow or frozen client can no longer block /health
+    # (and with it the whole app). GPU work stays serialized via GPU_LOCK.
+    http.server.ThreadingHTTPServer((HOST, PORT), Handler).serve_forever()
