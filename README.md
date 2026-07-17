@@ -80,11 +80,20 @@ each frame t ∈ [-1,1]:  camera offset = f(t)   AND   light azimuth = offset + 
                         frame = blend(photo, albedo) × shading(normals, light) + specular glint
 ```
 
-The decomposition uses **IntrinsicAnything** (ECCV 2024, zju3dv) — two latent
-diffusion models that split a single photo into albedo and specular shading.
-Note the published repo has *no relight function* (the paper's relighting is
-multi-view only); the shading step above is this app's own implementation of
-the paper's rendering equation, with normals derived from the depth map.
+The decomposition uses **Marigold-IID (Lighting)** (`prs-eth/
+marigold-iid-lighting-v1-1`, CreativeML OpenRAIL++-M license) via the
+diffusers pipeline: it splits a photo as `I = Albedo × Shading + Residual`,
+which maps exactly onto this pipeline — the albedo feeds the relit render,
+the non-diffuse residual is the specular map, and the shading is discarded
+(the shader synthesizes new shading). ~0.7s warm per photo at 768px; the
+~2GB weights auto-download on first use. Albedo gets high-frequency detail
+re-injected from the original photo (multiplicative `orig / blur(orig)`
+transfer), since the diffusion itself works at 768px.
+
+(History: the first backend was IntrinsicAnything (ECCV 2024) — scene-level
+but 256px, minutes per map, 30GB of weights, and its best-quality
+competitor (Careaga & Aksoy) is academic-license-only. Marigold replaced it
+wholesale; the vendored `IntrinsicAnythingSpace/` folder is obsolete.)
 
 ### Using it
 
@@ -109,38 +118,16 @@ When Relight is enabled it replaces the Flash effect for 2D depth-map modes
 
 ### Companion setup for relighting
 
-One-time, in the companion Python env (`conda activate comfyui`):
+Nothing beyond the base companion setup — Marigold ships inside `diffusers`
+(already required) and its ~2GB fp16 checkpoint auto-downloads from the HF
+hub on the first Decompose. `/health` reports `"intrinsic": true` when
+diffusers ≥ 0.34 is present.
 
-```bash
-# code (the HF Space layout is what the companion imports)
-hf download LittleFrog/IntrinsicAnything --repo-type space --local-dir IntrinsicAnythingSpace
-# weights (~15GB total, two diffusion checkpoints)
-hf download LittleFrog/IntrinsicAnything --local-dir IntrinsicAnythingSpace/weights
-# deps not already in the env
-pip install pytorch_lightning taming-transformers-rom1504 "clip @ git+https://github.com/openai/CLIP.git" ftfy regex
-```
-
-Three small patches to the vendored Space code are needed for a modern env
-(all already applied in this checkout):
-
-1. `models/ldm/util.py` — make the `carvekit` import lazy (move
-   `from carvekit.api.high import HiInterface` inside
-   `create_carvekit_interface`); carvekit is only used for object masking,
-   which the companion never does.
-2. `matfusion.py` line ~30 — `torch.load(..., weights_only=False)`; torch ≥ 2.6
-   changed the default and the checkpoints contain numpy scalars.
-3. `models/ldm/models/diffusion/ddpm.py` —
-   `from pytorch_lightning.utilities.rank_zero import rank_zero_only`
-   (moved from `.utilities.distributed` in PL ≥ 2).
-
-Measured on this machine (RTX GPU, fast mode, 2048×1536 input): ~15-25s per
-map once models are warm; the first request additionally loads two 15GB
-checkpoints (~2 min each).
-
-Restart the companion; `/health` now reports `"intrinsic": true` and the
-Decompose button appears in the app. The endpoint is `POST /intrinsic`
-(query params: `?hq=1` for a tiled high-res second pass, `?steps=N` DDIM steps,
-default 50), returning `{"albedo": <base64 PNG>, "specular": <base64 PNG>}`.
+The endpoint is `POST /intrinsic` (query param `?hq=1` for 10 steps + an
+ensemble of 3 instead of the default 4 steps), returning
+`{"albedo", "specular", "shading"}` as base64 PNGs. The VRAM used by the
+pipeline is released after each request so the browser's WebGL splat viewer
+has room. Measured: ~5s cold including model load, <1s warm, at 2048×1536.
 
 ### Current limitations
 

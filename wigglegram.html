@@ -409,7 +409,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       </button>
       <label id="intrinsicHQRow" style="display:none; align-items:center; gap:0.4rem; font-size:0.68rem; color:var(--text-dim); cursor:pointer; padding:0 0.25rem;">
         <input type="checkbox" id="intrinsicHQChk" onchange="PARAMS.intrinsicHQ = this.checked">
-        HQ decompose (tiled, ~5-10 min)
+        HQ decompose (ensemble, slower)
       </label>
     </div>
 
@@ -1754,7 +1754,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     const btn = document.getElementById('intrinsicBtn');
     btn.disabled = true;
     btn.querySelector('.label-text').textContent = PARAMS.intrinsicHQ
-      ? 'Decomposing HQ... (~5-10 min)' : 'Decomposing... (~1-2 min)';
+      ? 'Decomposing HQ... (~30s)' : 'Decomposing... (~5s)';
     setStatus('decomposing lighting (IntrinsicAnything)...', 'working');
     try {
       const resp = await fetch(COMPANION_URL + '/intrinsic' + (PARAMS.intrinsicHQ ? '?hq=1' : ''), {
