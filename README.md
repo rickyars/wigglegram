@@ -117,13 +117,25 @@ hf download LittleFrog/IntrinsicAnything --repo-type space --local-dir Intrinsic
 # weights (~15GB total, two diffusion checkpoints)
 hf download LittleFrog/IntrinsicAnything --local-dir IntrinsicAnythingSpace/weights
 # deps not already in the env
-pip install pytorch_lightning "clip @ git+https://github.com/openai/CLIP.git" ftfy regex
+pip install pytorch_lightning taming-transformers-rom1504 "clip @ git+https://github.com/openai/CLIP.git" ftfy regex
 ```
 
-Then patch `IntrinsicAnythingSpace/models/ldm/util.py` to make the `carvekit`
-import lazy (move `from carvekit.api.high import HiInterface` inside
-`create_carvekit_interface`) — carvekit is only used for object masking, which
-the companion never does. This patch is already applied in this checkout.
+Three small patches to the vendored Space code are needed for a modern env
+(all already applied in this checkout):
+
+1. `models/ldm/util.py` — make the `carvekit` import lazy (move
+   `from carvekit.api.high import HiInterface` inside
+   `create_carvekit_interface`); carvekit is only used for object masking,
+   which the companion never does.
+2. `matfusion.py` line ~30 — `torch.load(..., weights_only=False)`; torch ≥ 2.6
+   changed the default and the checkpoints contain numpy scalars.
+3. `models/ldm/models/diffusion/ddpm.py` —
+   `from pytorch_lightning.utilities.rank_zero import rank_zero_only`
+   (moved from `.utilities.distributed` in PL ≥ 2).
+
+Measured on this machine (RTX GPU, fast mode, 2048×1536 input): ~15-25s per
+map once models are warm; the first request additionally loads two 15GB
+checkpoints (~2 min each).
 
 Restart the companion; `/health` now reports `"intrinsic": true` and the
 Decompose button appears in the app. The endpoint is `POST /intrinsic`
