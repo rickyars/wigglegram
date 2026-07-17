@@ -105,9 +105,27 @@ wholesale; the vendored `IntrinsicAnythingSpace/` folder has been deleted.)
 
 ### Using it
 
+Relighting works in **both** 2D depth-map modes and splat mode.
+
+**2D modes:**
+
 1. Start the companion server
-2. Load a photo, click **Generate Depth**, then **Decompose Lighting (Marigold)** (~10s warm, first click loads models)
-3. The **Relight** folder unlocks in the panel, enabled by default — tune in the live preview. In splat mode, regenerate the splat afterwards so it's built from the albedo.
+2. Load a photo, click **Generate Depth**, then **Decompose Lighting (Marigold)** (~10s warm; the first click downloads/loads models)
+3. The **Relight** folder unlocks, enabled by default — tune in the live preview
+
+**Splat mode — order matters:**
+
+1. Load a photo and click **Decompose Lighting (Marigold)** FIRST
+2. Then click **Generate Splat (from albedo)** — the button relabels once a
+   decomposition exists, and the splat is built from the shading-free albedo
+   instead of the photo. (A splat generated *before* decomposing still has the
+   photo's baked lighting; just regenerate it.)
+3. Every rendered frame passes through the compositor shader: normal-map
+   shading + specular glints, light azimuth locked to the camera swing, flash
+   stacked on top. The splat provides parallax; the shader repaints the light.
+
+The pane buttons **[depth] [albedo] [spec] [normals]** switch the preview pane
+between the depth map and the decomposition components for sanity-checking.
 
 ### Relight parameters
 
