@@ -337,6 +337,10 @@
       <div class="preview-panel">
         <div class="preview-label">
           <span id="depthPaneLabel">depth (none)</span>
+          <div class="splat-mode-toggle" id="intrinsicToggle">
+            <button class="splat-mode-btn" id="paneAlbedoBtn">[albedo]</button>
+            <button class="splat-mode-btn" id="paneSpecBtn">[spec]</button>
+          </div>
           <div class="splat-mode-toggle" id="splatModeToggle">
             <button class="splat-mode-btn active" id="splatDepthBtn">[depth]</button>
             <button class="splat-mode-btn" id="splat3DBtn">[3D]</button>
@@ -803,8 +807,10 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     renderToPane(canvas) {
-      const width = canvas.width || this.depthImageData.width;
-      const height = canvas.height || this.depthImageData.height;
+      // Always size the pane to the depth map itself — inheriting stale
+      // canvas dimensions stretched the depth preview.
+      const width = this.depthImageData.width;
+      const height = this.depthImageData.height;
       canvas.width = width;
       canvas.height = height;
 
@@ -933,6 +939,10 @@ sharp predict -i your_image.jpg -o output/</pre>
         this._originalCanvas.style.display = '';
         this._originalCanvas = null;
       }
+      if (this._specTexture) {
+        this._specTexture.dispose();
+        this._specTexture = null;
+      }
       if (this._compositor) {
         this._compositor.renderTarget.dispose();
         this._compositor.material.dispose();
@@ -967,6 +977,14 @@ sharp predict -i your_image.jpg -o output/</pre>
           flashFalloff: { value: 4.0 },
           flashWarmth: { value: 0.0 },
           flashVignette: { value: 1.0 },
+          relightEnabled: { value: false },
+          lightDir: { value: new THREE.Vector3(0, 0, 1) },
+          relightAmbient: { value: 0.25 },
+          reliefScale: { value: 1.0 },
+          specStrength: { value: 0.5 },
+          shininess: { value: 24.0 },
+          tSpec: { value: null },
+          hasSpec: { value: false },
           texelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
         },
         vertexShader: `
@@ -986,6 +1004,14 @@ sharp predict -i your_image.jpg -o output/</pre>
           uniform float flashFalloff;
           uniform float flashWarmth;
           uniform float flashVignette;
+          uniform bool relightEnabled;
+          uniform vec3 lightDir;
+          uniform float relightAmbient;
+          uniform float reliefScale;
+          uniform float specStrength;
+          uniform float shininess;
+          uniform sampler2D tSpec;
+          uniform bool hasSpec;
           uniform vec2 texelSize;
           varying vec2 vUv;
 
@@ -996,6 +1022,21 @@ sharp predict -i your_image.jpg -o output/</pre>
 
           void main() {
             vec4 color = texture2D(tDiffuse, vUv);
+            if (relightEnabled) {
+              // Geometric normals from the splat's own depth buffer — much
+              // finer than any 2D depth map. Screen x/y, z toward camera.
+              float dC = linearizeDepth(texture2D(tDepth, vUv).x);
+              float dX = linearizeDepth(texture2D(tDepth, vUv + vec2(texelSize.x * 2.0, 0.0)).x);
+              float dY = linearizeDepth(texture2D(tDepth, vUv + vec2(0.0, texelSize.y * 2.0)).x);
+              vec3 n = normalize(vec3((dX - dC) * reliefScale, (dY - dC) * reliefScale, 1.0));
+              float diff = max(dot(n, lightDir), 0.0);
+              float shade = relightAmbient + (1.0 - relightAmbient) * diff;
+              vec3 h = normalize(lightDir + vec3(0.0, 0.0, 1.0));
+              float specMask = hasSpec ? dot(texture2D(tSpec, vUv).rgb, vec3(0.299, 0.587, 0.114)) : 0.25;
+              float spec = specStrength * specMask * pow(max(dot(n, h), 0.0), shininess);
+              gl_FragColor = vec4(color.rgb * shade + spec, color.a);
+              return;
+            }
             if (!flashEnabled) {
               gl_FragColor = color;
               return;
@@ -1027,8 +1068,9 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     _renderWithFlash() {
-      if (!PARAMS.flashEnabled) {
-        // Flash off: render directly to canvas (preserves MSAA and color output).
+      const relightActive = PARAMS.relightEnabled && albedoImageData;
+      if (!PARAMS.flashEnabled && !relightActive) {
+        // Effects off: render directly to canvas (preserves MSAA and color output).
         this.renderer.setRenderTarget(null);
         this.viewer.update();
         this.viewer.render();
@@ -1045,13 +1087,41 @@ sharp predict -i your_image.jpg -o output/</pre>
         return;
       }
       const { renderTarget, material, scene, camera } = this._compositor;
-      material.uniforms.flashEnabled.value = !!PARAMS.flashEnabled;
+      material.uniforms.flashEnabled.value = !!PARAMS.flashEnabled && !relightActive;
       material.uniforms.flashIntensity.value = PARAMS.flashIntensity;
       // Falloff is expressed in multiples of the camera-to-subject distance so
       // the same slider value works regardless of the splat's scene scale.
       material.uniforms.flashFalloff.value = PARAMS.flashFalloff * (this._autoFitDist || 3.0) * PARAMS.splatZoom;
       material.uniforms.flashWarmth.value = PARAMS.flashWarmth;
       material.uniforms.flashVignette.value = PARAMS.flashVignette;
+
+      material.uniforms.relightEnabled.value = relightActive;
+      if (relightActive) {
+        // Light azimuth follows the camera swing: same normalized t drives both.
+        const t = this._lightT || 0;
+        const az = (PARAMS.lightOffset + PARAMS.lightSwing * t) * Math.PI / 180;
+        const el = PARAMS.lightElev * Math.PI / 180;
+        material.uniforms.lightDir.value.set(
+          Math.sin(az) * Math.cos(el), Math.sin(el), Math.cos(az) * Math.cos(el));
+        material.uniforms.relightAmbient.value = PARAMS.relightAmbient;
+        // Convert the relief slider into a geometric slope scale: depth
+        // gradient is taken over 2 texels, each spanning worldPerTexel units.
+        const fovRad = (this.camera.fov || 45) * Math.PI / 180;
+        const dist = (this._autoFitDist || 3.0) * PARAMS.splatZoom;
+        const worldPerTexel = 2 * Math.tan(fovRad / 2) * dist / h;
+        material.uniforms.reliefScale.value = PARAMS.normalStrength * 0.33 / (worldPerTexel * 2);
+        material.uniforms.specStrength.value = PARAMS.specStrength;
+        material.uniforms.shininess.value = PARAMS.shininess;
+        if (specularImageData && !this._specTexture) {
+          const c = document.createElement('canvas');
+          c.width = specularImageData.width;
+          c.height = specularImageData.height;
+          c.getContext('2d').putImageData(specularImageData, 0, 0);
+          this._specTexture = new this._THREE.CanvasTexture(c);
+        }
+        material.uniforms.tSpec.value = this._specTexture || null;
+        material.uniforms.hasSpec.value = !!this._specTexture;
+      }
 
       this.renderer.setRenderTarget(renderTarget);
       // Splats are alpha-blended and don't write depth by default, which leaves
@@ -1295,8 +1365,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       const startTime = performance.now();
       const tick = () => {
         const t = (performance.now() - startTime) / 1000;
-        const angle = Math.sin(t * Math.PI / 2) * (PARAMS.splatSwingAngle * Math.PI / 180);
+        const tNorm = Math.sin(t * Math.PI / 2);
+        const angle = tNorm * (PARAMS.splatSwingAngle * Math.PI / 180);
         this.positionCamera(mode, angle, params);
+        this._lightT = tNorm;
         this._renderWithFlash();
         this.oscId = requestAnimationFrame(tick);
       };
@@ -1311,6 +1383,7 @@ sharp predict -i your_image.jpg -o output/</pre>
 
       const angle = t * (PARAMS.splatSwingAngle * Math.PI / 180);
       this.positionCamera(mode, angle, params);
+      this._lightT = t;
 
       // Settle splat sort worker before capture (6 ticks). rAF doesn't fire
       // in hidden tabs, so race it against a timeout to avoid hanging.
@@ -1358,6 +1431,8 @@ sharp predict -i your_image.jpg -o output/</pre>
   });
   document.getElementById('splatDepthBtn').addEventListener('click', switchToDepthView);
   document.getElementById('splat3DBtn').addEventListener('click', switchTo3DView);
+  document.getElementById('paneAlbedoBtn').addEventListener('click', () => togglePaneView('albedo'));
+  document.getElementById('paneSpecBtn').addEventListener('click', () => togglePaneView('specular'));
   console.log('[wigglegram] event listeners registered');
 
   document.getElementById('depthSourceInput').addEventListener('change', (e) => {
@@ -1428,6 +1503,12 @@ sharp predict -i your_image.jpg -o output/</pre>
         specularImageData = null;
         PARAMS.relightEnabled = false;
         if (relightFolder) relightFolder.hidden = true;
+        paneView = 'depth';
+        document.getElementById('intrinsicToggle').classList.remove('visible');
+        document.getElementById('paneAlbedoBtn').classList.remove('active');
+        document.getElementById('paneSpecBtn').classList.remove('active');
+        const splatLbl = document.getElementById('companionBtn').querySelector('.label-text');
+        if (splatLbl) splatLbl.textContent = 'Generate Splat (ml-sharp)';
         if (splatFolder) splatFolder.hidden = true;
         if (flashFolder) flashFolder.hidden = false;
         if (depthFolder) depthFolder.hidden = true;
@@ -1506,6 +1587,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (depthFolder) depthFolder.hidden = true;
       if (splatFolder) splatFolder.hidden = false;
       if (flashFolder) flashFolder.hidden = false;
+      if (relightFolder) relightFolder.hidden = !albedoImageData;
       updateMotionBinding(null, true);
     }).catch(err => {
       console.error('splat load error:', err);
@@ -1538,6 +1620,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (depthFolder) depthFolder.hidden = true;
     if (splatFolder) splatFolder.hidden = false;
     if (flashFolder) flashFolder.hidden = false;
+    if (relightFolder) relightFolder.hidden = !albedoImageData;
     updateMotionBinding(null, true);
     updateDepthPaneLabel('splat (3D)');
     document.getElementById('splatDepthBtn').classList.remove('active');
@@ -1598,10 +1681,22 @@ sharp predict -i your_image.jpg -o output/</pre>
     btn.querySelector('.label-text').textContent = 'Generating splat... (~1 min)';
     setStatus('generating splat via ml-sharp...', 'working');
     try {
+      // With a decomposition loaded, build the splat from the ALBEDO so its
+      // colors are shading-free — the relight compositor re-adds the light.
+      let body = srcFile;
+      let ctype = srcFile.type || 'image/jpeg';
+      if (albedoImageData) {
+        const c = document.createElement('canvas');
+        c.width = albedoImageData.width;
+        c.height = albedoImageData.height;
+        c.getContext('2d').putImageData(albedoImageData, 0, 0);
+        body = await new Promise(r => c.toBlob(r, 'image/png'));
+        ctype = 'image/png';
+      }
       const resp = await fetch(COMPANION_URL + '/predict', {
         method: 'POST',
-        headers: { 'Content-Type': srcFile.type || 'image/jpeg' },
-        body: srcFile,
+        headers: { 'Content-Type': ctype },
+        body,
       });
       if (!resp.ok) {
         let msg = 'companion error ' + resp.status;
@@ -1661,6 +1756,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       specularImageData = await toImageData(data.specular);
       if (relightFolder) relightFolder.hidden = false;
       PARAMS.relightEnabled = true;
+      document.getElementById('intrinsicToggle').classList.add('visible');
+      const splatBtnLabel = document.getElementById('companionBtn').querySelector('.label-text');
+      if (splatBtnLabel) splatBtnLabel.textContent = 'Generate Splat (from albedo)';
       setStatus('decomposition ready \u2014 Relight controls unlocked', 'done');
       schedulePreviewRebuild();
     } catch (err) {
@@ -1768,6 +1866,32 @@ sharp predict -i your_image.jpg -o output/</pre>
     depthEstimatorFailed = false; // clicking again is an explicit retry
     estimateAIDepth(document.getElementById('srcCanvas'));
   };
+
+  // ─── DECOMPOSITION PANE VIEWS ([albedo]/[spec] toggle on the depth pane) ───
+  let paneView = 'depth';
+
+  function togglePaneView(kind) {
+    const img = kind === 'albedo' ? albedoImageData : specularImageData;
+    if (!img) return;
+    paneView = (paneView === kind) ? 'depth' : kind;
+    const canvas = document.getElementById('depthCanvas');
+    const albBtn = document.getElementById('paneAlbedoBtn');
+    const specBtn = document.getElementById('paneSpecBtn');
+    albBtn.classList.toggle('active', paneView === 'albedo');
+    specBtn.classList.toggle('active', paneView === 'specular');
+    if (paneView === 'depth') {
+      if (activeDepthSource && !(activeDepthSource instanceof SplatDepthSource)) {
+        activeDepthSource.renderToPane(canvas);
+      } else {
+        clearDepthPane();
+      }
+      return;
+    }
+    const show = paneView === 'albedo' ? albedoImageData : specularImageData;
+    canvas.width = show.width;
+    canvas.height = show.height;
+    canvas.getContext('2d').putImageData(show, 0, 0);
+  }
 
   function clearDepthPane() {
     const canvas = document.getElementById('depthCanvas');

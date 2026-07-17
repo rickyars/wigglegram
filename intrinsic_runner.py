@@ -43,7 +43,24 @@ def get_model(kind):
             ckpt_path=str(IA_ROOT / "weights" / kind), use_ddim=True, gpu_id=DEVICE
         )
         logger.info(f"{kind} model ready.")
+    # Model may have been offloaded to CPU after the previous request
+    _MODELS[kind].model.model.to(DEVICE)
     return _MODELS[kind]
+
+
+def offload_models():
+    """Move IA models to CPU RAM and free VRAM. The diffusion models are used
+    rarely (once per photo) but hold ~10GB of VRAM warm, which starves the
+    browser's WebGL context when a large splat loads. CPU round-trip costs
+    ~10-20s per request — much better than checkpoint reload from disk."""
+    for kind, m in _MODELS.items():
+        try:
+            m.model.model.to("cpu")
+        except Exception:  # noqa: BLE001
+            logger.warning(f"offload of {kind} failed")
+    if DEVICE == "cuda":
+        torch.cuda.empty_cache()
+    logger.info("IA models offloaded to CPU; VRAM freed.")
 
 
 def decompose(image_rgb_u8, kind="albedo", hq=False, ddim_steps=50):

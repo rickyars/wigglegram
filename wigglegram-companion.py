@@ -121,6 +121,8 @@ def run_intrinsic(image_bytes: bytes, hq: bool, steps: int) -> bytes:
     albedo = INTRINSIC_RUNNER.decompose(img, kind="albedo", hq=hq, ddim_steps=steps)
     LOGGER.info("intrinsic: specular pass...")
     specular = INTRINSIC_RUNNER.decompose(img, kind="specular", hq=hq, ddim_steps=steps)
+    # Free VRAM so the browser's WebGL splat viewer isn't starved
+    INTRINSIC_RUNNER.offload_models()
     return json.dumps({"albedo": to_b64(albedo), "specular": to_b64(specular)}).encode()
 
 
