@@ -405,7 +405,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         <span class="label-text">Generate Splat (ml-sharp)</span>
       </button>
       <button class="upload-btn" id="intrinsicBtn" style="display:none" onclick="decomposeViaCompanion()">
-        <span class="label-text">Decompose Lighting (IntrinsicAnything)</span>
+        <span class="label-text">Decompose Lighting (Marigold)</span>
       </button>
       <label id="intrinsicHQRow" style="display:none; align-items:center; gap:0.4rem; font-size:0.68rem; color:var(--text-dim); cursor:pointer; padding:0 0.25rem;">
         <input type="checkbox" id="intrinsicHQChk" onchange="PARAMS.intrinsicHQ = this.checked">
@@ -479,7 +479,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   // ─── STATE ──────────────────────────────────────────────────────────────────
   let srcImageData = null;
   let srcFile = null;
-  let albedoImageData = null;   // IntrinsicAnything decomposition (source res)
+  let albedoImageData = null;   // Marigold-IID decomposition (source res)
   let specularImageData = null;
   let activeDepthSource = null;
   let blueNoise = null;
@@ -1669,7 +1669,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           document.getElementById('intrinsicBtn').style.display = '';
           document.getElementById('intrinsicHQRow').style.display = 'flex';
         }
-        console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats' + (info.intrinsic ? ' + IntrinsicAnything' : '') + ' enabled');
+        console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats' + (info.intrinsic ? ' + Marigold-IID' : '') + ' enabled');
         return;
       }
     } catch (e) {
@@ -1743,7 +1743,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
   };
 
-  // Companion IntrinsicAnything: decompose the source photo into albedo +
+  // Companion Marigold-IID: decompose the source photo into albedo +
   // specular maps for the Relight system. Slow (diffusion, ~30-90s on GPU).
   window.decomposeViaCompanion = async function() {
     if (!srcFile || companionBusy) {
@@ -1755,7 +1755,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     btn.disabled = true;
     btn.querySelector('.label-text').textContent = PARAMS.intrinsicHQ
       ? 'Decomposing HQ... (~30s)' : 'Decomposing... (~5s)';
-    setStatus('decomposing lighting (IntrinsicAnything)...', 'working');
+    setStatus('decomposing lighting (Marigold)...', 'working');
     try {
       const resp = await fetch(COMPANION_URL + '/intrinsic' + (PARAMS.intrinsicHQ ? '?hq=1' : ''), {
         method: 'POST',
@@ -1795,7 +1795,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     } finally {
       companionBusy = false;
       btn.disabled = false;
-      btn.querySelector('.label-text').textContent = 'Decompose Lighting (IntrinsicAnything)';
+      btn.querySelector('.label-text').textContent = 'Decompose Lighting (Marigold)';
     }
   };
 
@@ -2085,7 +2085,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   // Physically-inspired shading of the (albedo-blended) source: normals come
   // from the depth map's gradients, the light azimuth is a function of the
   // same view offset t that drives the camera, so lighting and parallax are
-  // synced by construction. spec is a luminance map (IntrinsicAnything
+  // synced by construction. spec is a luminance map (Marigold-IID
   // specular output) or null.
   function applyRelight2D(frameData, spec, depth, t, width, height) {
     if (!PARAMS.relightEnabled) return frameData;
