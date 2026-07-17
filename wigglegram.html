@@ -323,7 +323,7 @@
 
 <header>
   <h1>wigglegram</h1>
-  <div class="sub">luminance &rarr; depth &rarr; parallax &rarr; gif</div>
+  <div class="sub">depth &rarr; parallax &rarr; gif</div>
 </header>
 
 <div class="app-layout">
@@ -336,7 +336,7 @@
       </div>
       <div class="preview-panel">
         <div class="preview-label">
-          <span id="depthPaneLabel">depth (luminance)</span>
+          <span id="depthPaneLabel">depth (none)</span>
           <div class="splat-mode-toggle" id="splatModeToggle">
             <button class="splat-mode-btn active" id="splatDepthBtn">[depth]</button>
             <button class="splat-mode-btn" id="splat3DBtn">[3D]</button>
@@ -366,9 +366,9 @@
     </div>
 
     <div class="note">
-      depth is estimated automatically in your browser (Depth Anything V2, ~25MB one-time model download).
-      bright pixels = near (unless inverted). you can also supply your own grayscale depth map or a .ply splat
-      via the Depth Source button.
+      click Generate Depth to estimate depth (companion DA3 if running, otherwise Depth Anything V2
+      in-browser, ~25MB one-time model download). bright pixels = near (unless inverted). you can also
+      supply your own grayscale depth map or a .ply splat via the Depth Source button.
     </div>
 
     <details id="mlsharpHelp" style="display:none; margin-top:0.5rem; border-left: 2px solid var(--border-active); padding: 0.75rem 1rem; color: var(--text-dim); font-size: 0.72rem; line-height: 1.7;">
@@ -393,6 +393,9 @@ sharp predict -i your_image.jpg -o output/</pre>
         <a href="#" id="clearDepthSourceLink" class="clear-link" style="display:none" onclick="clearDepthSource(event)">[clear]</a>
         <input type="file" id="depthSourceInput" accept="image/*,.ply">
       </label>
+      <button class="upload-btn" id="genDepthBtn" disabled onclick="generateDepth()">
+        <span class="label-text">Generate Depth</span>
+      </button>
       <button class="upload-btn" id="companionBtn" style="display:none" onclick="generateSplatViaCompanion()">
         <span class="label-text">Generate Splat (ml-sharp)</span>
       </button>
@@ -732,19 +735,6 @@ sharp predict -i your_image.jpg -o output/</pre>
       width,
       height,
     };
-  }
-
-  class LuminanceDepthSource {
-    constructor(srcImageData) {
-      this.srcImageData = srcImageData;
-    }
-
-    renderToPane(canvas) {
-      const depth = getDepthMap(this.srcImageData);
-      drawDepthToCanvas(canvas, depth, this.srcImageData.width, this.srcImageData.height);
-    }
-
-    captureFrame(...args) { return captureDepthMapFrame(...args); }
   }
 
   class ImageDepthSource {
@@ -1344,6 +1334,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       updateDepthPaneLabel('depth (custom: ' + file.name + ')');
       depthSourceBtn.querySelector('.label-text').textContent = file.name;
       depthSourceBtn.classList.add('loaded');
+      document.getElementById('generateBtn').disabled = false;
       schedulePreviewRebuild();
     };
     img.src = URL.createObjectURL(file);
@@ -1368,17 +1359,18 @@ sharp predict -i your_image.jpg -o output/</pre>
         ctx.drawImage(img, 0, 0);
         srcImageData = ctx.getImageData(0, 0, img.width, img.height);
         disposeSplat();
-        activeDepthSource = new LuminanceDepthSource(srcImageData);
+        activeDepthSource = null;
+        clearDepthPane();
         if (splatFolder) splatFolder.hidden = true;
         if (flashFolder) flashFolder.hidden = false;
         if (depthFolder) depthFolder.hidden = true;
         document.getElementById('splatModeToggle').classList.remove('visible');
-        activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
         updateMotionBinding(PARAMS.mode, false);
-        updateDepthPaneLabel('depth (luminance)');
+        updateDepthPaneLabel('depth (none)');
 
         document.getElementById('previews').classList.add('visible');
-        document.getElementById('generateBtn').disabled = false;
+        document.getElementById('generateBtn').disabled = true;
+        document.getElementById('genDepthBtn').disabled = false;
 
         // Update source upload button
         const btn = document.getElementById('sourceUploadBtn');
@@ -1393,8 +1385,7 @@ sharp predict -i your_image.jpg -o output/</pre>
 
         setStatus('ready  \u00b7  ' + img.width + '\u00d7' + img.height, '');
 
-        schedulePreviewRebuild();
-        estimateAIDepth(canvas);
+        hidePreview();
       } catch(err) {
         console.error('loadSourceImage onload error:', err);
       }
@@ -1408,7 +1399,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   // depth-map source while the 3D view is showing.
   let splatSource = null;
   let savedDepthSource = null;
-  let savedDepthLabel = 'depth (luminance)';
+  let savedDepthLabel = 'depth (none)';
 
   function disposeSplat() {
     if (activeDepthSource instanceof SplatDepthSource) activeDepthSource.dispose();
@@ -1438,6 +1429,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     setStatus('loading splat...', 'working');
     splatSrc.load(file, depthPaneCanvas).then(() => {
       updateDepthPaneLabel('splat (3D)');
+      document.getElementById('generateBtn').disabled = false;
       document.getElementById('splatModeToggle').classList.add('visible');
       const depthBtn = document.getElementById('splatDepthBtn');
       depthBtn.classList.remove('active');
@@ -1634,7 +1626,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       console.error('AI depth estimation failed:', err);
       depthEstimatorFailed = true;
       if (requestId === depthRequestId && activeDepthSource === forSource) {
-        setStatus('AI depth unavailable \u2014 using luminance', '');
+        setStatus('AI depth unavailable \u2014 upload a depth map or splat', 'error');
       }
     }
   }
@@ -1645,15 +1637,29 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (depthFolder) depthFolder.hidden = false;
     updateMotionBinding(PARAMS.mode, false);
     updateDepthPaneLabel(label);
+    document.getElementById('generateBtn').disabled = false;
     setStatus(label.replace('depth (', '').replace(')', '') + ' depth ready', 'done');
     schedulePreviewRebuild();
+  }
+
+  // Manual trigger for depth estimation (replaces the old auto-run on load)
+  window.generateDepth = function() {
+    if (!srcImageData) return;
+    depthEstimatorFailed = false; // clicking again is an explicit retry
+    estimateAIDepth(document.getElementById('srcCanvas'));
+  };
+
+  function clearDepthPane() {
+    const canvas = document.getElementById('depthCanvas');
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
   }
 
   function updateDepthPaneLabel(text) {
     const label = document.getElementById('depthPaneLabel');
     const clearLink = document.getElementById('clearDepthSourceLink');
     if (label) label.textContent = text;
-    if (clearLink) clearLink.style.display = text === 'depth (luminance)' ? 'none' : 'inline';
+    if (clearLink) clearLink.style.display = text === 'depth (none)' ? 'none' : 'inline';
   }
 
   window.clearDepthSource = function(e) {
@@ -1665,9 +1671,11 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (flashFolder) flashFolder.hidden = false;
     if (depthFolder) depthFolder.hidden = true;
     document.getElementById('splatModeToggle').classList.remove('visible');
-    activeDepthSource = new LuminanceDepthSource(srcImageData);
-    activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
-    updateDepthPaneLabel('depth (luminance)');
+    activeDepthSource = null;
+    clearDepthPane();
+    updateDepthPaneLabel('depth (none)');
+    document.getElementById('generateBtn').disabled = true;
+    hidePreview();
 
     const depthSourceBtn = document.getElementById('depthSourceBtn');
     depthSourceBtn.querySelector('.label-text').textContent = 'Upload Depth Source (optional)';
@@ -1965,14 +1973,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     return out;
   }
 
-  function getDepthMap(imageData) {
-    const invert = PARAMS.invertDepth;
-    const smoothR = Math.min(PARAMS.bokehCoc, 4);
-    let d = computeLuminanceDepth(imageData, invert);
-    d = boxBlur(d, imageData.width, imageData.height, smoothR);
-    d = boxBlur(d, imageData.width, imageData.height, smoothR);
-    return d;
-  }
   // ─── FRAME GENERATION ──────────────────────────────────────────────────────
   const NUM_DEPTH_PASSES = 32;
 
@@ -2203,22 +2203,16 @@ sharp predict -i your_image.jpg -o output/</pre>
 
     // Compute depth at scaled resolution from activeDepthSource
     const invert = PARAMS.invertDepth;
-    let depth;
-    if (activeDepthSource instanceof ImageDepthSource) {
-      const rawCanvas = document.createElement('canvas');
-      rawCanvas.width = activeDepthSource.depthImageData.width;
-      rawCanvas.height = activeDepthSource.depthImageData.height;
-      rawCanvas.getContext('2d').putImageData(activeDepthSource.depthImageData, 0, 0);
-      const tmp = document.createElement('canvas');
-      tmp.width = width; tmp.height = height;
-      const ctx = tmp.getContext('2d');
-      ctx.drawImage(rawCanvas, 0, 0, width, height);
-      const scaledDepthData = ctx.getImageData(0, 0, width, height);
-      depth = computeLuminanceDepth(scaledDepthData, invert);
-    } else {
-      // LuminanceDepthSource: compute from scaled source
-      depth = computeLuminanceDepth(scaledSrc, invert);
-    }
+    const rawCanvas = document.createElement('canvas');
+    rawCanvas.width = activeDepthSource.depthImageData.width;
+    rawCanvas.height = activeDepthSource.depthImageData.height;
+    rawCanvas.getContext('2d').putImageData(activeDepthSource.depthImageData, 0, 0);
+    const depthTmp = document.createElement('canvas');
+    depthTmp.width = width; depthTmp.height = height;
+    const depthCtx = depthTmp.getContext('2d');
+    depthCtx.drawImage(rawCanvas, 0, 0, width, height);
+    const scaledDepthData = depthCtx.getImageData(0, 0, width, height);
+    let depth = computeLuminanceDepth(scaledDepthData, invert);
     const depthSmoothR = Math.min(cocScale, 4);
     depth = boxBlur(depth, width, height, depthSmoothR);
     depth = boxBlur(depth, width, height, depthSmoothR);
@@ -2259,7 +2253,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   }
 
   async function rebuildPreview() {
-    if (!srcImageData || activeDepthSource instanceof SplatDepthSource) {
+    if (!srcImageData || !activeDepthSource || activeDepthSource instanceof SplatDepthSource) {
       hidePreview();
       return;
     }
@@ -2296,6 +2290,10 @@ sharp predict -i your_image.jpg -o output/</pre>
   // ─── PIPELINE ──────────────────────────────────────────────────────────────
   async function runPipeline(targetWidth) {
     if (!srcImageData) return;
+    if (!activeDepthSource) {
+      setStatus('no depth source — generate or upload one first', 'error');
+      return;
+    }
 
     setStatus('starting...', 'working');
     setProgress(0);
