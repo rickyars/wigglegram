@@ -15,10 +15,10 @@ Endpoints (127.0.0.1:8765):
                       (Depth Anything 3 MONO-LARGE, bright = near; lazy-loaded
                       on first call, then kept warm)
     POST /intrinsic -> body: image bytes; response JSON:
-                      {"albedo": <base64 PNG>, "specular": <base64 PNG>}
-                      (IntrinsicAnything diffusion decomposition; lazy-loaded.
-                      Query params: ?hq=1 for tiled high-res pass, ?steps=N
-                      for DDIM steps, default 50.)
+                      {"albedo","specular","shading","normals": <base64 PNG>}
+                      (Marigold-IID lighting decomposition + Marigold-Normals
+                      surface normal estimation; lazy-loaded. ?hq=1 for more
+                      steps + ensembling.)
 """
 import http.server
 import json
@@ -123,10 +123,13 @@ def run_intrinsic(image_bytes: bytes, hq: bool, steps: int) -> bytes:
 
     LOGGER.info("intrinsic: Marigold-IID decompose (hq=%s)...", hq)
     albedo, specular, shading = INTRINSIC_RUNNER.decompose_full(img, hq=hq)
+    LOGGER.info("intrinsic: Marigold-Normals estimate...")
+    normals = INTRINSIC_RUNNER.estimate_normals(img, hq=hq)
     # Free VRAM so the browser's WebGL splat viewer isn't starved
     INTRINSIC_RUNNER.offload_models()
     return json.dumps({"albedo": to_b64(albedo), "specular": to_b64(specular),
-                       "shading": to_b64(shading)}).encode()
+                       "shading": to_b64(shading),
+                       "normals": to_b64(normals)}).encode()
 
 
 def run_predict(image_bytes: bytes, suffix: str) -> bytes:

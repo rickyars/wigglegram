@@ -481,6 +481,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   let srcFile = null;
   let albedoImageData = null;   // Marigold-IID decomposition (source res)
   let specularImageData = null;
+  let normalsImageData = null;  // Marigold-Normals surface normal map (source res)
   let activeDepthSource = null;
   let blueNoise = null;
   let gifBlobUrl = null;
@@ -948,6 +949,10 @@ sharp predict -i your_image.jpg -o output/</pre>
         this._specTexture.dispose();
         this._specTexture = null;
       }
+      if (this._normalsTexture) {
+        this._normalsTexture.dispose();
+        this._normalsTexture = null;
+      }
       if (this._compositor) {
         this._compositor.renderTarget.dispose();
         this._compositor.material.dispose();
@@ -990,6 +995,9 @@ sharp predict -i your_image.jpg -o output/</pre>
           shininess: { value: 24.0 },
           tSpec: { value: null },
           hasSpec: { value: false },
+          tNormals: { value: null },
+          hasNormals: { value: false },
+          normalGain: { value: 1.0 },
           texelSize: { value: new THREE.Vector2(1 / w, 1 / h) },
         },
         vertexShader: `
@@ -1017,6 +1025,9 @@ sharp predict -i your_image.jpg -o output/</pre>
           uniform float shininess;
           uniform sampler2D tSpec;
           uniform bool hasSpec;
+          uniform sampler2D tNormals;
+          uniform bool hasNormals;
+          uniform float normalGain;
           uniform vec2 texelSize;
           varying vec2 vUv;
 
@@ -1030,15 +1041,25 @@ sharp predict -i your_image.jpg -o output/</pre>
             vec3 rgb = color.rgb;
 
             if (relightEnabled) {
-              // Geometric normals from the splat's own depth buffer. Central
-              // differences over wide taps: splat depth is noisy, and forward
-              // differences turned that noise into randomly-tilted normals
-              // that crushed the whole frame dark and sprayed specular.
-              float dL = linearizeDepth(texture2D(tDepth, vUv - vec2(texelSize.x * 3.0, 0.0)).x);
-              float dR = linearizeDepth(texture2D(tDepth, vUv + vec2(texelSize.x * 3.0, 0.0)).x);
-              float dD = linearizeDepth(texture2D(tDepth, vUv - vec2(0.0, texelSize.y * 3.0)).x);
-              float dU = linearizeDepth(texture2D(tDepth, vUv + vec2(0.0, texelSize.y * 3.0)).x);
-              vec3 n = normalize(vec3((dR - dL) * reliefScale, (dU - dD) * reliefScale, 1.0));
+              vec3 n;
+              if (hasNormals) {
+                // Marigold-predicted normal map (screen-aligned like tSpec —
+                // valid for small camera swings): real surface detail that
+                // splat depth-buffer differences can never recover.
+                n = texture2D(tNormals, vUv).rgb * 2.0 - 1.0;
+                n.xy *= normalGain;
+                n = normalize(n);
+              } else {
+                // Fallback: geometric normals from the splat's own depth
+                // buffer. Central differences over wide taps: splat depth is
+                // noisy, and forward differences turned that noise into
+                // randomly-tilted normals that crushed the frame dark.
+                float dL = linearizeDepth(texture2D(tDepth, vUv - vec2(texelSize.x * 3.0, 0.0)).x);
+                float dR = linearizeDepth(texture2D(tDepth, vUv + vec2(texelSize.x * 3.0, 0.0)).x);
+                float dD = linearizeDepth(texture2D(tDepth, vUv - vec2(0.0, texelSize.y * 3.0)).x);
+                float dU = linearizeDepth(texture2D(tDepth, vUv + vec2(0.0, texelSize.y * 3.0)).x);
+                n = normalize(vec3((dR - dL) * reliefScale, (dU - dD) * reliefScale, 1.0));
+              }
               float diff = max(dot(n, lightDir), 0.0);
               float shade = relightAmbient + (1.0 - relightAmbient) * diff;
               // Normalize so a camera-facing surface keeps its brightness at
@@ -1137,6 +1158,16 @@ sharp predict -i your_image.jpg -o output/</pre>
         }
         material.uniforms.tSpec.value = this._specTexture || null;
         material.uniforms.hasSpec.value = !!this._specTexture;
+        if (normalsImageData && !this._normalsTexture) {
+          const c = document.createElement('canvas');
+          c.width = normalsImageData.width;
+          c.height = normalsImageData.height;
+          c.getContext('2d').putImageData(normalsImageData, 0, 0);
+          this._normalsTexture = new this._THREE.CanvasTexture(c);
+        }
+        material.uniforms.tNormals.value = this._normalsTexture || null;
+        material.uniforms.hasNormals.value = !!this._normalsTexture;
+        material.uniforms.normalGain.value = PARAMS.normalStrength / 3;
       }
 
       this.renderer.setRenderTarget(renderTarget);
@@ -1518,6 +1549,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         clearDepthPane();
         albedoImageData = null;
         specularImageData = null;
+        normalsImageData = null;
         PARAMS.relightEnabled = false;
         if (relightFolder) relightFolder.hidden = true;
         paneView = 'depth';
@@ -1754,7 +1786,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     const btn = document.getElementById('intrinsicBtn');
     btn.disabled = true;
     btn.querySelector('.label-text').textContent = PARAMS.intrinsicHQ
-      ? 'Decomposing HQ... (~30s)' : 'Decomposing... (~5s)';
+      ? 'Decomposing HQ... (~60s)' : 'Decomposing... (~10s)';
     setStatus('decomposing lighting (Marigold)...', 'working');
     try {
       const resp = await fetch(COMPANION_URL + '/intrinsic' + (PARAMS.intrinsicHQ ? '?hq=1' : ''), {
@@ -1782,6 +1814,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       };
       albedoImageData = await toImageData(data.albedo);
       specularImageData = await toImageData(data.specular);
+      normalsImageData = data.normals ? await toImageData(data.normals) : null;
       if (relightFolder) relightFolder.hidden = false;
       PARAMS.relightEnabled = true;
       document.getElementById('intrinsicToggle').classList.add('visible');
@@ -1900,9 +1933,11 @@ sharp predict -i your_image.jpg -o output/</pre>
   // ─── DECOMPOSITION PANE VIEWS ([albedo]/[spec] toggle on the depth pane) ───
   let paneView = 'depth';
 
-  // Visualize the normals the relight shading actually uses (smoothed depth
-  // gradients), as a standard RGB normal map.
+  // Visualize the normals the relight shading actually uses: the Marigold
+  // predicted normal map when available, else the smoothed-depth-gradient
+  // fallback, as a standard RGB normal map.
   function buildNormalsView() {
+    if (normalsImageData) return normalsImageData;
     if (!(activeDepthSource instanceof ImageDepthSource)) return null;
     const src = activeDepthSource.depthImageData;
     const width = src.width, height = src.height;
@@ -2087,6 +2122,8 @@ sharp predict -i your_image.jpg -o output/</pre>
   // same view offset t that drives the camera, so lighting and parallax are
   // synced by construction. spec is a luminance map (Marigold-IID
   // specular output) or null.
+  let scaledRelightNormals = null; // set by prepareScaledInputs, same dims as frame
+
   function applyRelight2D(frameData, spec, depth, t, width, height) {
     if (!PARAMS.relightEnabled) return frameData;
 
@@ -2106,11 +2143,25 @@ sharp predict -i your_image.jpg -o output/</pre>
     const specStrength = PARAMS.specStrength;
     const shininess = PARAMS.shininess;
 
+    // Preferred normal source: the Marigold-predicted normal map — real
+    // per-pixel surface orientation (noses, folds, hair). The depth-gradient
+    // fallback below terraces on 8-bit depth quantization ("tiered cake")
+    // and only captures coarse geometry.
+    const nm = (scaledRelightNormals
+      && scaledRelightNormals.width === width
+      && scaledRelightNormals.height === height) ? scaledRelightNormals.data : null;
+    // normalStrength doubles as a shading-contrast gain on predicted normals
+    // (default 3 = neutral); for the fallback it stays the relief gain.
+    const nGain = PARAMS.normalStrength / 3;
+
     // Smooth the depth before taking gradients: 8-bit depth quantization
     // steps otherwise become visible "topographic" ridges once amplified by
     // the relief gain. Wider stencil (±2) for the same reason.
-    let nDepth = boxBlur(depth, width, height, 2);
-    nDepth = boxBlur(nDepth, width, height, 2);
+    let nDepth = null;
+    if (!nm) {
+      nDepth = boxBlur(depth, width, height, 2);
+      nDepth = boxBlur(nDepth, width, height, 2);
+    }
 
     const out = new Uint8ClampedArray(frameData.length);
     for (let y = 0; y < height; y++) {
@@ -2118,13 +2169,20 @@ sharp predict -i your_image.jpg -o output/</pre>
       const y1 = Math.min(y + 2, height - 1) * width;
       for (let x = 0; x < width; x++) {
         const i = y * width + x;
-        const xm = Math.max(x - 2, 0);
-        const xp = Math.min(x + 2, width - 1);
-        // Screen-space depth gradients -> surface normal. Image y grows
-        // downward but world y grows upward, hence the sign flip on ny.
-        const dzdx = (nDepth[y * width + xp] - nDepth[y * width + xm]) * 0.25 * k;
-        const dzdy = (nDepth[y1 + x] - nDepth[y0 + x]) * 0.25 * k;
-        let nx = -dzdx, ny = dzdy, nz = 1;
+        let nx, ny, nz;
+        if (nm) {
+          // Marigold camera-frame normals: X right, Y up, Z toward camera —
+          // same frame the light vector is built in. Gain tilts x/y only.
+          nx = nm[i * 3] * nGain; ny = nm[i * 3 + 1] * nGain; nz = nm[i * 3 + 2];
+        } else {
+          const xm = Math.max(x - 2, 0);
+          const xp = Math.min(x + 2, width - 1);
+          // Screen-space depth gradients -> surface normal. Image y grows
+          // downward but world y grows upward, hence the sign flip on ny.
+          const dzdx = (nDepth[y * width + xp] - nDepth[y * width + xm]) * 0.25 * k;
+          const dzdy = (nDepth[y1 + x] - nDepth[y0 + x]) * 0.25 * k;
+          nx = -dzdx; ny = dzdy; nz = 1;
+        }
         const nn = Math.hypot(nx, ny, nz);
         nx /= nn; ny /= nn; nz /= nn;
 
@@ -2625,6 +2683,23 @@ sharp predict -i your_image.jpg -o output/</pre>
         for (let i = 0; i < width * height; i++) {
           scaledSpec[i] = (0.299 * sp[i * 4] + 0.587 * sp[i * 4 + 1] + 0.114 * sp[i * 4 + 2]) / 255;
         }
+      }
+      // Predicted surface normals (Marigold), decoded to unit vectors at
+      // frame resolution. Stashed module-level so applyRelight2D — which is
+      // always fed inputs from this same prepare pass — can pick them up
+      // without threading another parameter through every capture signature.
+      scaledRelightNormals = null;
+      if (normalsImageData) {
+        const nm = scaleImg(normalsImageData).data;
+        const arr = new Float32Array(width * height * 3);
+        for (let i = 0; i < width * height; i++) {
+          let nx = nm[i * 4] / 127.5 - 1;
+          let ny = nm[i * 4 + 1] / 127.5 - 1;
+          let nz = nm[i * 4 + 2] / 127.5 - 1;
+          const nn = Math.hypot(nx, ny, nz) || 1;
+          arr[i * 3] = nx / nn; arr[i * 3 + 1] = ny / nn; arr[i * 3 + 2] = nz / nn;
+        }
+        scaledRelightNormals = { width, height, data: arr };
       }
     }
 

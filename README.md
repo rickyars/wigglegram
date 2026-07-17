@@ -75,7 +75,8 @@ and parallax are synced by construction.
 
 ```
 photo ──► companion /intrinsic ──► albedo (shading-free colors) + specular map
-photo ──► Generate Depth        ──► depth ──► per-pixel normals (from gradients)
+                                   + surface normal map (Marigold-Normals)
+photo ──► Generate Depth        ──► depth (parallax/warp geometry only)
 each frame t ∈ [-1,1]:  camera offset = f(t)   AND   light azimuth = offset + swing·t
                         frame = blend(photo, albedo) × shading(normals, light) + specular glint
 ```
@@ -90,16 +91,24 @@ the non-diffuse residual is the specular map, and the shading is discarded
 re-injected from the original photo (multiplicative `orig / blur(orig)`
 transfer), since the diffusion itself works at 768px.
 
+Shading normals come from **Marigold-Normals** (`prs-eth/marigold-normals-v1-1`,
+same license/pipeline family, ~2GB, runs in the same Decompose click): a
+predicted per-pixel surface normal map with real orientation detail (noses,
+fabric folds, hair). The earlier approach — normals from depth-map gradients —
+terraced on 8-bit depth quantization ("tiered cake" contours) and only knew
+coarse geometry, so shading flattened all surface detail. Depth-gradient
+normals remain only as a fallback when no decomposition has been run.
+
 (History: the first backend was IntrinsicAnything (ECCV 2024) — scene-level
 but 256px, minutes per map, 30GB of weights, and its best-quality
 competitor (Careaga & Aksoy) is academic-license-only. Marigold replaced it
-wholesale; the vendored `IntrinsicAnythingSpace/` folder is obsolete.)
+wholesale; the vendored `IntrinsicAnythingSpace/` folder has been deleted.)
 
 ### Using it
 
-1. Start the companion server (needs the IntrinsicAnything weights, see setup below)
-2. Load a photo, click **Generate Depth**, then **Decompose Lighting (IntrinsicAnything)** (~30-90s on GPU)
-3. The **Relight** folder unlocks in the panel, enabled by default — tune in the live preview
+1. Start the companion server
+2. Load a photo, click **Generate Depth**, then **Decompose Lighting (Marigold)** (~10s warm, first click loads models)
+3. The **Relight** folder unlocks in the panel, enabled by default — tune in the live preview. In splat mode, regenerate the splat afterwards so it's built from the albedo.
 
 ### Relight parameters
 
@@ -109,12 +118,13 @@ wholesale; the vendored `IntrinsicAnythingSpace/` folder is obsolete.)
 | **light offset °** | Where the light sits at center frame. | Constant azimuth term. |
 | **light elevation °** | Light height: positive = from above. | Elevation angle of the light vector. |
 | **ambient** | Shadow depth floor — higher = flatter, softer lighting. | Constant term in `shade = ambient + (1-ambient)·max(n·l, 0)`. |
-| **relief** | How strongly surfaces respond to the light angle. | Scale on depth gradients before normal construction. |
-| **specular** / **shininess** | Glint strength and tightness on shiny surfaces. | Blinn-Phong term masked by the IntrinsicAnything specular map. |
+| **relief** | How strongly surfaces respond to the light angle. | Gain on the predicted normal's x/y before renormalizing (default 3 = neutral); for the depth-gradient fallback, scale on the gradients. |
+| **specular** / **shininess** | Glint strength and tightness on shiny surfaces. | Blinn-Phong term masked by the Marigold specular (residual) map. |
 | **albedo blend** | 0 = original photo (original shadows kept), 1 = full albedo (shadows fully removed). ~0.8 keeps some photographic texture. | Linear mix of source and albedo before shading. |
 
-When Relight is enabled it replaces the Flash effect for 2D depth-map modes
-(a camera-locked flash is just `swing ≈ 0`, high `relief`, light at 0° elevation).
+Relight and Flash **stack** in both 2D and splat modes: relight shapes the
+surfaces per-frame, then the flash blowout/vignette applies on top like a
+real strobe.
 
 ### Companion setup for relighting
 
@@ -125,14 +135,16 @@ diffusers ≥ 0.34 is present.
 
 The endpoint is `POST /intrinsic` (query param `?hq=1` for 10 steps + an
 ensemble of 3 instead of the default 4 steps), returning
-`{"albedo", "specular", "shading"}` as base64 PNGs. The VRAM used by the
-pipeline is released after each request so the browser's WebGL splat viewer
-has room. Measured: ~5s cold including model load, <1s warm, at 2048×1536.
+`{"albedo", "specular", "shading", "normals"}` as base64 PNGs (normals
+encoded `rgb = (n+1)/2`, camera frame, X right / Y up / Z toward camera).
+The VRAM used by both pipelines is released after each request so the
+browser's WebGL splat viewer has room. ~1-2s warm total at 2048×1536.
 
 ### Current limitations
 
-- **2D depth-map modes only** — splat mode still uses the Flash effect. (Planned:
-  build the splat from the albedo image and shade it in the splat compositor.)
+- **Splat-mode normals are screen-aligned** — the normal map is sampled in
+  screen space like the specular map, which is approximately correct for the
+  small camera swings a wigglegram uses but ignores parallax within the map.
 - **Mirror-content reflections are not fixed** — intrinsic decomposition removes
   specular sheen and shading, but a scene reflected in a mirror/window is
   content, not shading. That needs a layered renderer with mirrored depth

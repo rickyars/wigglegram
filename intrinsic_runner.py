@@ -21,6 +21,7 @@ from loguru import logger
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 _PIPE = None
+_NORMALS_PIPE = None
 
 
 def weights_available():
@@ -47,11 +48,27 @@ def get_pipe():
     return _PIPE
 
 
+def get_normals_pipe():
+    global _NORMALS_PIPE
+    if _NORMALS_PIPE is None:
+        import diffusers
+        logger.info("Loading Marigold-Normals pipeline...")
+        _NORMALS_PIPE = diffusers.MarigoldNormalsPipeline.from_pretrained(
+            "prs-eth/marigold-normals-v1-1",
+            variant="fp16", torch_dtype=torch.float16,
+        )
+        logger.info("Marigold-Normals ready.")
+    _NORMALS_PIPE.to(DEVICE)
+    return _NORMALS_PIPE
+
+
 def offload_models():
     """Free VRAM between requests so the browser's WebGL splat viewer isn't
     starved. Marigold is small (~2GB) and cheap to shuttle back."""
     if _PIPE is not None:
         _PIPE.to("cpu")
+    if _NORMALS_PIPE is not None:
+        _NORMALS_PIPE.to("cpu")
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
     logger.info("Marigold pipeline offloaded to CPU; VRAM freed.")
@@ -99,3 +116,27 @@ def decompose_full(image_rgb_u8, hq=False, ddim_steps=None):
     specular = to_u8(vis[0]["residual"])
     shading = to_u8(vis[0]["shading"])
     return albedo, specular, shading
+
+
+def estimate_normals(image_rgb_u8, hq=False):
+    """HxWx3 uint8 screen-space normal map at source resolution.
+    Encoding: rgb = (n+1)/2 with X right, Y up, Z toward camera (Marigold
+    convention). Captures fine surface orientation (noses, folds, hair) that
+    depth-map gradients structurally cannot."""
+    from PIL import Image
+
+    pipe = get_normals_pipe()
+    img = Image.fromarray(image_rgb_u8)
+    steps = 10 if hq else 4
+    kwargs = {"num_inference_steps": steps}
+    if hq:
+        kwargs["ensemble_size"] = 3
+
+    with torch.no_grad():
+        result = pipe(img, **kwargs)
+    vis = pipe.image_processor.visualize_normals(result.prediction)
+    arr = np.array(vis[0].convert("RGB"))
+    if arr.shape[:2] != image_rgb_u8.shape[:2]:
+        arr = np.array(Image.fromarray(arr).resize(
+            (image_rgb_u8.shape[1], image_rgb_u8.shape[0]), Image.LANCZOS))
+    return arr
