@@ -121,13 +121,12 @@ def run_intrinsic(image_bytes: bytes, hq: bool, steps: int) -> bytes:
         Image.fromarray(arr).save(buf, format="PNG")
         return base64.b64encode(buf.getvalue()).decode()
 
-    LOGGER.info("intrinsic: albedo pass (hq=%s, steps=%d)...", hq, steps)
-    albedo = INTRINSIC_RUNNER.decompose(img, kind="albedo", hq=hq, ddim_steps=steps)
-    LOGGER.info("intrinsic: specular pass...")
-    specular = INTRINSIC_RUNNER.decompose(img, kind="specular", hq=hq, ddim_steps=steps)
+    LOGGER.info("intrinsic: Marigold-IID decompose (hq=%s)...", hq)
+    albedo, specular, shading = INTRINSIC_RUNNER.decompose_full(img, hq=hq)
     # Free VRAM so the browser's WebGL splat viewer isn't starved
     INTRINSIC_RUNNER.offload_models()
-    return json.dumps({"albedo": to_b64(albedo), "specular": to_b64(specular)}).encode()
+    return json.dumps({"albedo": to_b64(albedo), "specular": to_b64(specular),
+                       "shading": to_b64(shading)}).encode()
 
 
 def run_predict(image_bytes: bytes, suffix: str) -> bytes:

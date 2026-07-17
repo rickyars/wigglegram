@@ -1,76 +1,68 @@
-"""In-memory IntrinsicAnything wrapper for the wigglegram companion server.
+"""Intrinsic decomposition for the wigglegram companion server.
 
-Uses the HF Space code (vendored in ./IntrinsicAnythingSpace, downloaded via
-`hf download LittleFrog/IntrinsicAnything --repo-type space`) because its
-InferenceModel takes in-memory tensors; the GitHub repo's only reads/writes
-directories. Weights come from the model repo (see README).
+Backend: Marigold-IID "Lighting" (prs-eth/marigold-iid-lighting-v1-1) via the
+diffusers pipeline. It decomposes a photo as  I = Albedo * Shading + Residual,
+which maps 1:1 onto the app's relight model: albedo feeds the relit splat,
+the non-diffuse residual is the specular map, the shading is discarded (the
+shader synthesizes new shading). Runs at 768px in a few steps — orders of
+magnitude faster than the previous IntrinsicAnything backend, with a usable
+license (CreativeML OpenRAIL++-M). Weights (~2GB) auto-download on first use.
 
-    decompose(image_rgb_u8, kind="albedo"|"specular", hq=False) -> HxWx3 uint8
+    decompose_full(image_rgb_u8, hq=False) -> (albedo, specular, shading) u8
 
-Scene-level: the whole image is foreground (all-ones mask). Fast mode is one
-low-res diffusion pass; HQ additionally runs a 2x2-tiled guided pass at higher
-step count (slower, sharper).
+Albedo gets high-frequency detail re-injected from the original photo
+(the diffusion works at 768px; fine detail above that is transferred back
+multiplicatively).
 """
-import sys
-from pathlib import Path
-
 import numpy as np
 import torch
 from loguru import logger
 
-IA_ROOT = Path(__file__).resolve().parent / "IntrinsicAnythingSpace"
-sys.path.insert(1, str(IA_ROOT))
-sys.path.insert(1, str(IA_ROOT / "models"))
-
-from inference import InferenceModel  # noqa: E402
-
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-_MODELS = {}
+_PIPE = None
 
 
 def weights_available():
-    return all(
-        (IA_ROOT / "weights" / k / "checkpoints" / "last.ckpt").exists()
-        for k in ("albedo", "specular")
-    )
+    """Marigold auto-downloads from the HF hub; intrinsic support just needs
+    diffusers with the Marigold pipelines (>= 0.34)."""
+    try:
+        import diffusers
+        return hasattr(diffusers, "MarigoldIntrinsicsPipeline")
+    except Exception:  # noqa: BLE001
+        return False
 
 
-def get_model(kind):
-    if kind not in _MODELS:
-        logger.info(f"Loading IntrinsicAnything {kind} model...")
-        _MODELS[kind] = InferenceModel(
-            ckpt_path=str(IA_ROOT / "weights" / kind), use_ddim=True, gpu_id=DEVICE
+def get_pipe():
+    global _PIPE
+    if _PIPE is None:
+        import diffusers
+        logger.info("Loading Marigold-IID (lighting) pipeline...")
+        _PIPE = diffusers.MarigoldIntrinsicsPipeline.from_pretrained(
+            "prs-eth/marigold-iid-lighting-v1-1",
+            variant="fp16", torch_dtype=torch.float16,
         )
-        logger.info(f"{kind} model ready.")
-    # Model may have been offloaded to CPU after the previous request
-    _MODELS[kind].model.model.to(DEVICE)
-    return _MODELS[kind]
+        logger.info("Marigold-IID ready.")
+    _PIPE.to(DEVICE)
+    return _PIPE
 
 
 def offload_models():
-    """Move IA models to CPU RAM and free VRAM. The diffusion models are used
-    rarely (once per photo) but hold ~10GB of VRAM warm, which starves the
-    browser's WebGL context when a large splat loads. CPU round-trip costs
-    ~10-20s per request — much better than checkpoint reload from disk."""
-    for kind, m in _MODELS.items():
-        try:
-            m.model.model.to("cpu")
-        except Exception:  # noqa: BLE001
-            logger.warning(f"offload of {kind} failed")
+    """Free VRAM between requests so the browser's WebGL splat viewer isn't
+    starved. Marigold is small (~2GB) and cheap to shuttle back."""
+    if _PIPE is not None:
+        _PIPE.to("cpu")
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
-    logger.info("IA models offloaded to CPU; VRAM freed.")
+    logger.info("Marigold pipeline offloaded to CPU; VRAM freed.")
 
 
 def reinject_detail(albedo_u8, original_u8, radius=8):
-    """The diffusion decomposition runs at 256px, so the upsampled albedo is
-    mushy. Multiply it by the ORIGINAL photo's high-frequency ratio
+    """Multiply the albedo by the ORIGINAL photo's high-frequency ratio
     (orig / blur(orig)): fine detail — faces, hair, fabric weave — comes back
     from the photo while the albedo keeps its shading-free colors and the
     low-frequency shading stays removed."""
     import cv2
-    import numpy as np
     alb = albedo_u8.astype(np.float32)
     orig = original_u8.astype(np.float32)
     k = (2 * radius + 1, 2 * radius + 1)
@@ -79,27 +71,31 @@ def reinject_detail(albedo_u8, original_u8, radius=8):
     return np.clip(alb * detail, 0, 255).astype(np.uint8)
 
 
-def decompose(image_rgb_u8, kind="albedo", hq=False, ddim_steps=50):
-    """image_rgb_u8: HxWx3 uint8. Returns HxWx3 uint8 at source resolution."""
-    model = get_model(kind)
-    img = torch.from_numpy(image_rgb_u8.astype(np.float32) / 255.0).to(DEVICE)
-    mask = torch.ones_like(img[..., :1])
+def decompose_full(image_rgb_u8, hq=False, ddim_steps=None):
+    """image_rgb_u8: HxWx3 uint8. Returns (albedo, specular, shading), each
+    HxWx3 uint8 at source resolution. hq trades time for an ensemble."""
+    from PIL import Image
 
-    res = model.generation((1, 1), 1, None, img, mask, dps_scale=0, uc_score=1,
-                           ddim_steps=ddim_steps, batch_size=1, n_samples=1)
-    out = res["out_images"][0]
-
+    pipe = get_pipe()
+    img = Image.fromarray(image_rgb_u8)
+    steps = ddim_steps or (10 if hq else 4)
+    kwargs = {"num_inference_steps": steps}
     if hq:
-        guid = torch.from_numpy(out.astype(np.float32) / 255.0).to(DEVICE)
-        res = model.generation((2, 2), 2, guid, img, mask, dps_scale=3, uc_score=1,
-                               ddim_steps=max(80, ddim_steps), batch_size=1, n_samples=1)
-        out = res["out_images"][0]
+        kwargs["ensemble_size"] = 3
 
-    # generation() returns the full-frame composite; resize guard just in case
-    if out.shape[:2] != image_rgb_u8.shape[:2]:
-        from PIL import Image
-        out = np.array(Image.fromarray(out).resize(
-            (image_rgb_u8.shape[1], image_rgb_u8.shape[0]), Image.LANCZOS))
-    if kind == "albedo":
-        out = reinject_detail(out, image_rgb_u8)
-    return out
+    with torch.no_grad():
+        result = pipe(img, **kwargs)
+    vis = pipe.image_processor.visualize_intrinsics(
+        result.prediction, pipe.target_properties)
+
+    def to_u8(pil_img):
+        arr = np.array(pil_img.convert("RGB"))
+        if arr.shape[:2] != image_rgb_u8.shape[:2]:
+            arr = np.array(Image.fromarray(arr).resize(
+                (image_rgb_u8.shape[1], image_rgb_u8.shape[0]), Image.LANCZOS))
+        return arr
+
+    albedo = reinject_detail(to_u8(vis[0]["albedo"]), image_rgb_u8)
+    specular = to_u8(vis[0]["residual"])
+    shading = to_u8(vis[0]["shading"])
+    return albedo, specular, shading
