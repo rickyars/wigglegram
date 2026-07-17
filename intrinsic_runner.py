@@ -22,6 +22,7 @@ DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
 _PIPE = None
 _NORMALS_PIPE = None
+_DEPTH_PIPE = None
 
 
 def weights_available():
@@ -62,6 +63,43 @@ def get_normals_pipe():
     return _NORMALS_PIPE
 
 
+def get_depth_pipe():
+    global _DEPTH_PIPE
+    if _DEPTH_PIPE is None:
+        import diffusers
+        logger.info("Loading Marigold-Depth pipeline...")
+        _DEPTH_PIPE = diffusers.MarigoldDepthPipeline.from_pretrained(
+            "prs-eth/marigold-depth-v1-1",
+            variant="fp16", torch_dtype=torch.float16,
+        )
+        logger.info("Marigold-Depth ready.")
+    _DEPTH_PIPE.to(DEVICE)
+    return _DEPTH_PIPE
+
+
+def estimate_depth(image_rgb_u8):
+    """HxWx1-equivalent grayscale uint8 depth at source resolution, bright =
+    near (the app's convention). Marigold depth is affine-invariant (relative);
+    normalized to the full 0-255 range, matching the old DA3 behavior but with
+    far smoother gradations and finer detail (hair, folds)."""
+    from PIL import Image
+
+    pipe = get_depth_pipe()
+    img = Image.fromarray(image_rgb_u8)
+    with torch.no_grad():
+        result = pipe(img, num_inference_steps=4)
+    d = np.asarray(result.prediction[0]).squeeze().astype(np.float32)
+    lo, hi = float(d.min()), float(d.max())
+    if hi - lo <= 0:
+        raise RuntimeError("degenerate depth output")
+    # Marigold: small = near; app wants bright = near
+    gray = ((1.0 - (d - lo) / (hi - lo)) * 255.0).astype(np.uint8)
+    if gray.shape != image_rgb_u8.shape[:2]:
+        gray = np.array(Image.fromarray(gray, mode="L").resize(
+            (image_rgb_u8.shape[1], image_rgb_u8.shape[0]), Image.LANCZOS))
+    return gray
+
+
 def offload_models():
     """Free VRAM between requests so the browser's WebGL splat viewer isn't
     starved. Marigold is small (~2GB) and cheap to shuttle back."""
@@ -69,6 +107,8 @@ def offload_models():
         _PIPE.to("cpu")
     if _NORMALS_PIPE is not None:
         _NORMALS_PIPE.to("cpu")
+    if _DEPTH_PIPE is not None:
+        _DEPTH_PIPE.to("cpu")
     if DEVICE == "cuda":
         torch.cuda.empty_cache()
     logger.info("Marigold pipeline offloaded to CPU; VRAM freed.")

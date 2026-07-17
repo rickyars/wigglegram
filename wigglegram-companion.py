@@ -12,8 +12,8 @@ Endpoints (127.0.0.1:8765):
     GET  /health   -> {"ok": true, "device": "cuda"}
     POST /predict  -> body: image bytes; response: .ply bytes (ml-sharp splat)
     POST /depth    -> body: image bytes; response: grayscale PNG depth map
-                      (Depth Anything 3 MONO-LARGE, bright = near; lazy-loaded
-                      on first call, then kept warm)
+                      (Marigold-Depth, bright = near; lazy-loaded on first
+                      call, VRAM released after each request)
     POST /intrinsic -> body: image bytes; response JSON:
                       {"albedo","specular","shading","normals": <base64 PNG>}
                       (Marigold-IID lighting decomposition + Marigold-Normals
@@ -58,38 +58,27 @@ PREDICTOR.to(DEVICE)
 LOGGER.info("Model ready. Listening on http://%s:%d", HOST, PORT)
 
 
-DA3_MODEL = None
-
 # Serialize GPU work across the threading server's request threads
 GPU_LOCK = threading.Lock()
 
 
 def run_depth(image_bytes: bytes, suffix: str) -> bytes:
-    global DA3_MODEL
-    if DA3_MODEL is None:
-        LOGGER.info("Loading Depth Anything 3 (DA3MONO-LARGE)...")
-        from depth_anything_3.api import DepthAnything3
-        DA3_MODEL = DepthAnything3.from_pretrained("depth-anything/DA3MONO-LARGE")
-        DA3_MODEL = DA3_MODEL.to(device=torch.device(DEVICE))
-        LOGGER.info("DA3 ready.")
+    global INTRINSIC_RUNNER
+    if INTRINSIC_RUNNER is None:
+        import intrinsic_runner
+        INTRINSIC_RUNNER = intrinsic_runner
     import io as std_io
 
     import numpy as np
     from PIL import Image
 
-    with tempfile.TemporaryDirectory() as tmp:
-        img_path = Path(tmp) / ("input" + suffix)
-        img_path.write_bytes(image_bytes)
-        pred = DA3_MODEL.inference([str(img_path)])
-        depth = pred.depth[0].astype("float32")
-        lo, hi = float(depth.min()), float(depth.max())
-        if hi - lo <= 0:
-            raise RuntimeError("degenerate depth output")
-        # DA3 depth is distance (small = near); app wants bright = near
-        gray = ((1.0 - (depth - lo) / (hi - lo)) * 255.0).astype(np.uint8)
-        buf = std_io.BytesIO()
-        Image.fromarray(gray, mode="L").save(buf, format="PNG")
-        return buf.getvalue()
+    img = np.array(Image.open(std_io.BytesIO(image_bytes)).convert("RGB"))
+    LOGGER.info("depth: Marigold-Depth estimate...")
+    gray = INTRINSIC_RUNNER.estimate_depth(img)
+    INTRINSIC_RUNNER.offload_models()
+    buf = std_io.BytesIO()
+    Image.fromarray(gray, mode="L").save(buf, format="PNG")
+    return buf.getvalue()
 
 
 INTRINSIC_RUNNER = None

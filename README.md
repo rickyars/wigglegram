@@ -10,7 +10,7 @@ A wigglegram (or "wiggle stereoscopy") is an animated GIF that rapidly alternate
 
 1. Open `wigglegram.html` in any modern browser (Chrome, Firefox, Edge, Safari)
 2. Click **Upload Source Image** and pick a photo
-3. Click **Generate Depth**: if the companion server is running (see below) it uses **Depth Anything 3** on your GPU (best quality, ~2s); otherwise it falls back to **Depth Anything V2 Small** in your browser (~25MB model downloads once, then is cached). Depth no longer runs automatically on upload, and the old luminance-as-depth placeholder is gone — until a depth source exists, the generate button stays disabled.
+3. Click **Generate Depth**: if the companion server is running (see below) it uses **Marigold-Depth** on your GPU (best quality, ~4s warm); otherwise it falls back to **Depth Anything V2 Small** in your browser (~25MB model downloads once, then is cached). Depth no longer runs automatically on upload, and the old luminance-as-depth placeholder is gone — until a depth source exists, the generate button stays disabled.
 4. (Optional) Click **Upload Depth Source** to supply your own grayscale depth map or a `.ply` gaussian splat instead — or use the companion server for one-click splats (see [Gaussian splats](#gaussian-splats-best-quality) below)
 5. Adjust parameters in the right-hand panel — the **live preview** loops the wiggle as you tune, no encoding needed
 6. Pick an output **format** (gif, or video — mp4/webm, typically ~10× smaller) and click **Generate**
@@ -24,7 +24,7 @@ No server, no install — everything runs in your browser. (AI depth uses WebGPU
 
 The companion server runs the big models on your GPU and gives the app two upgrades:
 
-- **Depth Anything 3** depth maps, used automatically on image upload (much better than the in-browser model) — you'll see `depth (DA3)` in the depth pane
+- **Marigold-Depth** depth maps (much better than the in-browser model; smooth gradations and fine detail — hair curls, fabric folds) — you'll see `depth (Marigold)` in the depth pane
 - A **Generate Splat (ml-sharp)** button for one-click gaussian splats — the best wiggle quality of all
 
 ### Starting the companion server
@@ -52,11 +52,10 @@ Leave the terminal running while you use the app; the model stays warm so repeat
 
 ```
 pip install --no-deps -e ./ml-sharp
-pip install --no-deps -e ./Depth-Anything-3
-pip install plyfile pillow-heif "moviepy<2" pycolmap trimesh evo typer
+pip install plyfile pillow-heif "diffusers>=0.34" torch pillow numpy opencv-python loguru
 ```
 
-The SHARP checkpoint (~2.6GB) downloads on first companion start; the DA3 model (~1.4GB) downloads on the first depth request. Both are cached afterwards.
+The SHARP checkpoint (~2.6GB) downloads on first companion start; the Marigold models (depth / IID-lighting / normals, ~2GB each) download from the HF hub on their first request. All are cached afterwards. (Depth was previously Depth Anything 3; Marigold-Depth replaced it 2026-07-17 for its finer detail — the `Depth-Anything-3/` editable install is no longer needed.)
 
 **Manual alternative:** run `sharp predict -i your_image.jpg -o output/` and upload the resulting `.ply` via the Depth Source button.
 

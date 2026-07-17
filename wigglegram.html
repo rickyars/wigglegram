@@ -371,7 +371,7 @@
     </div>
 
     <div class="note">
-      click Generate Depth to estimate depth (companion DA3 if running, otherwise Depth Anything V2
+      click Generate Depth to estimate depth (companion Marigold if running, otherwise Depth Anything V2
       in-browser, ~25MB one-time model download). bright pixels = near (unless inverted). you can also
       supply your own grayscale depth map or a .ply splat via the Depth Source button.
     </div>
@@ -1701,7 +1701,7 @@ sharp predict -i your_image.jpg -o output/</pre>
           document.getElementById('intrinsicBtn').style.display = '';
           document.getElementById('intrinsicHQRow').style.display = 'flex';
         }
-        console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats' + (info.intrinsic ? ' + Marigold-IID' : '') + ' enabled');
+        console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 Marigold depth + ml-sharp splats' + (info.intrinsic ? ' + Marigold-IID' : '') + ' enabled');
         return;
       }
     } catch (e) {
@@ -1711,7 +1711,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     console.log('[wigglegram] no companion detected \u2014 using in-browser depth only');
   })();
 
-  // Companion DA3 depth: returns ImageData at source resolution, or null
+  // Companion Marigold depth: returns ImageData at source resolution, or null
   async function companionDepth(srcCanvas) {
     const blob = await new Promise(r => srcCanvas.toBlob(r, 'image/png'));
     const resp = await fetch(COMPANION_URL + '/depth', {
@@ -1859,13 +1859,13 @@ sharp predict -i your_image.jpg -o output/</pre>
     // Remember which source we're estimating for; only apply if still current
     const forSource = activeDepthSource;
 
-    // Prefer companion DA3 depth (much better quality than the in-browser model)
+    // Prefer companion Marigold depth (much better quality than the in-browser model)
     if (companionAvailable) {
       try {
-        setStatus('estimating depth (DA3)...', 'working');
+        setStatus('estimating depth (Marigold)...', 'working');
         const depthImg = await companionDepth(srcCanvas);
         if (requestId !== depthRequestId || activeDepthSource !== forSource) return;
-        applyEstimatedDepth(depthImg, 'depth (DA3)');
+        applyEstimatedDepth(depthImg, 'depth (Marigold)');
         return;
       } catch (err) {
         console.warn('companion depth failed, falling back to in-browser model:', err);
