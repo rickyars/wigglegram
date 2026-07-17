@@ -407,6 +407,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       <button class="upload-btn" id="intrinsicBtn" style="display:none" onclick="decomposeViaCompanion()">
         <span class="label-text">Decompose Lighting (IntrinsicAnything)</span>
       </button>
+      <label id="intrinsicHQRow" style="display:none; align-items:center; gap:0.4rem; font-size:0.68rem; color:var(--text-dim); cursor:pointer; padding:0 0.25rem;">
+        <input type="checkbox" id="intrinsicHQChk" onchange="PARAMS.intrinsicHQ = this.checked">
+        HQ decompose (tiled, ~5-10 min)
+      </label>
     </div>
 
     <div id="tweakpane-container"></div>
@@ -1649,7 +1653,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (info.ok) {
         companionAvailable = true;
         document.getElementById('companionBtn').style.display = '';
-        if (info.intrinsic) document.getElementById('intrinsicBtn').style.display = '';
+        if (info.intrinsic) {
+          document.getElementById('intrinsicBtn').style.display = '';
+          document.getElementById('intrinsicHQRow').style.display = 'flex';
+        }
         console.log('[wigglegram] companion detected (device: ' + info.device + ') \u2014 DA3 depth + ml-sharp splats' + (info.intrinsic ? ' + IntrinsicAnything' : '') + ' enabled');
       }
     } catch (e) {
@@ -1731,7 +1738,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     companionBusy = true;
     const btn = document.getElementById('intrinsicBtn');
     btn.disabled = true;
-    btn.querySelector('.label-text').textContent = 'Decomposing... (~1-2 min)';
+    btn.querySelector('.label-text').textContent = PARAMS.intrinsicHQ
+      ? 'Decomposing HQ... (~5-10 min)' : 'Decomposing... (~1-2 min)';
     setStatus('decomposing lighting (IntrinsicAnything)...', 'working');
     try {
       const resp = await fetch(COMPANION_URL + '/intrinsic' + (PARAMS.intrinsicHQ ? '?hq=1' : ''), {
