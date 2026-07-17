@@ -14,3 +14,4 @@ free-blue-noise-textures/
 
 # test files
 test-images/
+__pycache__/
