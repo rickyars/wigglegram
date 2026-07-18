@@ -471,7 +471,10 @@ sharp predict -i your_image.jpg -o output/</pre>
     lightElev: 20,
     relightAmbient: 0.25,
     normalStrength: 3.0,
-    specStrength: 0.5,
+    // Off by default: the "spec" input is Marigold-IID's residual map, not a
+    // true specular map — any amount adds white light that visibly grays and
+    // desaturates the subject (A/B tested at 0.5 and 0.1). Opt-in only.
+    specStrength: 0,
     shininess: 24,
     albedoBlend: 1.0,
     intrinsicHQ: false,
@@ -1089,9 +1092,12 @@ sharp predict -i your_image.jpg -o output/</pre>
                 // Shading-ratio relight: splat colors are the original photo;
                 // dividing by the (mean-normalized) old shading removes the
                 // baked light exactly where the new shading re-adds it.
-                vec3 oldS = max(texture2D(tShade, vUv).rgb / shadeMean, vec3(0.25));
-                vec3 ratio = clamp(vec3(shade) / oldS, 0.25, 4.0);
-                rgb = rgb * mix(vec3(1.0), ratio, relightStrength) + spec * relightStrength;
+                // Luminance-only ratio: brightness changes, color never does
+                // (per-channel ratio stripped the photo's own color cast).
+                vec3 lw = vec3(0.2126, 0.7152, 0.0722);
+                float oldS = max(dot(texture2D(tShade, vUv).rgb, lw) / max(dot(shadeMean, lw), 0.05), 0.25);
+                float ratio = clamp(shade / oldS, 0.25, 4.0);
+                rgb = rgb * mix(1.0, ratio, relightStrength) + spec * relightStrength;
               } else {
                 rgb = rgb * shade + spec;
               }
@@ -1197,7 +1203,14 @@ sharp predict -i your_image.jpg -o output/</pre>
           c.width = shadingImageData.width;
           c.height = shadingImageData.height;
           c.getContext('2d').putImageData(shadingImageData, 0, 0);
-          this._shadeTexture = new this._THREE.CanvasTexture(c);
+          // Blur so only coarse lighting is divided out — fine shading
+          // detail must stay in the splat colors (see applyRelight2D notes).
+          const b = document.createElement('canvas');
+          b.width = c.width; b.height = c.height;
+          const bctx = b.getContext('2d');
+          bctx.filter = `blur(${Math.max(2, Math.round(Math.min(c.width, c.height) * 0.015))}px)`;
+          bctx.drawImage(c, 0, 0);
+          this._shadeTexture = new this._THREE.CanvasTexture(b);
         }
         material.uniforms.tShade.value = this._shadeTexture || null;
         material.uniforms.hasShade.value = !!this._shadeTexture;
@@ -2253,12 +2266,12 @@ sharp predict -i your_image.jpg -o output/</pre>
           // Shading-ratio relight: photo × (newShade / oldShade). Where the
           // new light matches the old, ratio ≈ 1 and the photo passes
           // through untouched — photographic realism is the baseline.
-          const r0 = Math.min(Math.max(shade / oldShade[i * 3],     0.25), 4);
-          const r1 = Math.min(Math.max(shade / oldShade[i * 3 + 1], 0.25), 4);
-          const r2 = Math.min(Math.max(shade / oldShade[i * 3 + 2], 0.25), 4);
-          out[p]     = frameData[p]     * (1 + (r0 - 1) * strength) + specAdd;
-          out[p + 1] = frameData[p + 1] * (1 + (r1 - 1) * strength) + specAdd;
-          out[p + 2] = frameData[p + 2] * (1 + (r2 - 1) * strength) + specAdd;
+          // Single luminance ratio applied to all channels: relight changes
+          // brightness only, never the photo's color balance.
+          const r = 1 + (Math.min(Math.max(shade / oldShade[i], 0.25), 4) - 1) * strength;
+          out[p]     = frameData[p]     * r + specAdd;
+          out[p + 1] = frameData[p + 1] * r + specAdd;
+          out[p + 2] = frameData[p + 2] * r + specAdd;
         } else {
           // No shading map (old decomposition): direct multiply fallback.
           out[p]     = frameData[p]     * shade + specAdd;
@@ -2729,17 +2742,29 @@ sharp predict -i your_image.jpg -o output/</pre>
         sctx.drawImage(c, 0, 0, width, height);
         return sctx.getImageData(0, 0, width, height);
       };
-      // Original shading map, per-channel mean-normalized so ratios center
-      // on 1 (overall exposure preserved; colored light casts neutralized).
+      // Original shading map as LUMINANCE, mean-normalized so ratios center
+      // on 1 (overall exposure preserved). Single channel on purpose: a
+      // per-channel ratio strips the photo's own color cast (sepia went
+      // gray) — brightness may change, color never should.
       scaledRelightShade = null;
       if (shadingImageData) {
         const sh = scaleImg(shadingImageData).data;
-        const arr = new Float32Array(width * height * 3);
+        const lumMean = Math.max(
+          0.2126 * shadingMean[0] + 0.7152 * shadingMean[1] + 0.0722 * shadingMean[2], 0.05);
+        let arr = new Float32Array(width * height);
         for (let i = 0; i < width * height; i++) {
-          arr[i * 3]     = Math.max(sh[i * 4]     / 255 / shadingMean[0], 0.25);
-          arr[i * 3 + 1] = Math.max(sh[i * 4 + 1] / 255 / shadingMean[1], 0.25);
-          arr[i * 3 + 2] = Math.max(sh[i * 4 + 2] / 255 / shadingMean[2], 0.25);
+          const lum = (0.2126 * sh[i * 4] + 0.7152 * sh[i * 4 + 1] + 0.0722 * sh[i * 4 + 2]) / 255;
+          arr[i] = lum / lumMean;
         }
+        // Blur the denominator: the shading map carries the photo's FINE
+        // shading (pores, fabric weave, hair) — dividing by it unblurred
+        // strips that detail and the smooth synthetic light never restores
+        // it (the "plastic skin" look). Blurred, only the coarse lighting
+        // gets swapped; all high-frequency detail rides through untouched.
+        const shBlurR = Math.max(2, Math.round(Math.min(width, height) * 0.015));
+        arr = boxBlur(arr, width, height, shBlurR);
+        arr = boxBlur(arr, width, height, shBlurR);
+        for (let i = 0; i < width * height; i++) arr[i] = Math.max(arr[i], 0.25);
         scaledRelightShade = { width, height, data: arr };
       }
       if (specularImageData) {

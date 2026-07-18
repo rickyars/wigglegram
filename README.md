@@ -86,16 +86,31 @@ relights it — in one step, per pixel. Where the new light matches the old,
 the ratio is ≈1 and the photo passes through untouched, so photographic
 realism is the baseline and only the light *changes*. (The earlier design
 multiplied synthetic shading over the 768px albedo image, which flattened
-detail and looked CG.) The old shading is mean-normalized per channel so
-overall exposure is preserved and colored light casts are neutralized;
-ratios are clamped to [0.25, 4].
+detail and looked CG.) Three details matter for realism:
+
+- **Luminance-only ratio** — the ratio is a single scalar per pixel
+  (luminance of the shading map), applied equally to R/G/B. Relighting
+  changes brightness, never color; a per-channel ratio stripped the photo's
+  own color cast (sepia photos went gray).
+- **Blurred denominator** — the old shading is blurred (~1.5% of the short
+  side) before dividing. The shading map carries the photo's *fine* shading
+  (pores, fabric weave, hair), and dividing by it unblurred strips that
+  detail into plastic-looking skin. Blurred, only the coarse lighting is
+  swapped and all high-frequency detail rides through untouched.
+- **Spec off by default** — the "specular" input is Marigold-IID's residual
+  map, not a true specular map; it is strong on skin, and adding it as white
+  light visibly grays/desaturates the subject. Dial it up only if a scene
+  genuinely has glints.
+
+The old shading is mean-normalized (overall exposure preserved) and ratios
+are clamped to [0.25, 4].
 
 The decomposition uses **Marigold-IID (Lighting)** (`prs-eth/
 marigold-iid-lighting-v1-1`, CreativeML OpenRAIL++-M license) via the
 diffusers pipeline: it splits a photo as `I = Albedo × Shading + Residual`,
-which maps exactly onto this pipeline — the albedo feeds the relit render,
-the non-diffuse residual is the specular map, and the shading is discarded
-(the shader synthesizes new shading). ~0.7s warm per photo at 768px; the
+which maps exactly onto this pipeline — the shading map is the ratio's
+denominator, the non-diffuse residual is the (opt-in) specular map, and the
+albedo image is shown in the [albedo] pane only. ~0.7s warm per photo at 768px; the
 ~2GB weights auto-download on first use. Albedo gets high-frequency detail
 re-injected from the original photo (multiplicative `orig / blur(orig)`
 transfer), since the diffusion itself works at 768px.
@@ -146,7 +161,7 @@ between the depth map and the decomposition components for sanity-checking.
 | **light elevation °** | Light height: positive = from above. | Elevation angle of the light vector. |
 | **ambient** | Shadow depth floor — higher = flatter, softer lighting. | Constant term in `shade = ambient + (1-ambient)·max(n·l, 0)`. |
 | **relief** | How strongly surfaces respond to the light angle. | Gain on the predicted normal's x/y before renormalizing (default 3 = neutral); for the depth-gradient fallback, scale on the gradients. |
-| **specular** / **shininess** | Glint strength and tightness on shiny surfaces. | Blinn-Phong term masked by the Marigold specular (residual) map. |
+| **specular** / **shininess** | Glint strength and tightness on shiny surfaces. Default 0 — the residual map is strong on skin and grays the subject; raise only for genuinely glinty scenes. | Blinn-Phong term masked by the Marigold specular (residual) map. |
 | **strength** | 0 = original photo untouched, 1 = full relight (original shadows removed, new light applied). | Blend toward the shading ratio: `pixel × (1 + (newShade/oldShade − 1)·strength)`. |
 
 Relight and Flash **stack** in both 2D and splat modes: relight shapes the
