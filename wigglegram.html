@@ -344,7 +344,7 @@
             <button class="splat-mode-btn" id="paneNormalsBtn">[normals]</button>
           </div>
           <div class="splat-mode-toggle" id="splatModeToggle">
-            <button class="splat-mode-btn active" id="splatDepthBtn">[depth]</button>
+            <button class="splat-mode-btn active" id="splatDepthBtn">[2D]</button>
             <button class="splat-mode-btn" id="splat3DBtn">[3D]</button>
           </div>
         </div>
@@ -459,6 +459,8 @@ sharp predict -i your_image.jpg -o output/</pre>
     splatSwingAngle: 5,
     splatOffsetX: 0,
     splatOffsetY: 0,
+    splatKernelSize: 0.5,
+    splatFocalAdjustment: 2.0,
     format: 'gif',
     flashEnabled: false,
     flashIntensity: 1.0,
@@ -601,6 +603,23 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (activeDepthSource instanceof SplatDepthSource) {
         activeDepthSource.repositionCamera(PARAMS.splatZoom);
       }
+    });
+
+    // focalAdjustment is a live shader uniform — takes effect immediately.
+    splatFolder.addBinding(PARAMS, 'splatFocalAdjustment', {
+      label: 'focal adjust',
+      min: 0.5, max: 4.0, step: 0.1,
+    }).on('change', (ev) => {
+      if (activeDepthSource instanceof SplatDepthSource && activeDepthSource.viewer) {
+        activeDepthSource.viewer.focalAdjustment = ev.value;
+      }
+    });
+
+    // kernel2DSize is baked into the splat shader at build time — changing
+    // it here only takes effect on the NEXT splat generation/reload.
+    splatFolder.addBinding(PARAMS, 'splatKernelSize', {
+      label: 'kernel size (reload to apply)',
+      min: 0.1, max: 1.5, step: 0.05,
     });
 
     // ── Flash (hidden until a splat is loaded) ──
@@ -928,7 +947,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (this.oscId) { cancelAnimationFrame(this.oscId); this.oscId = null; }
     }
 
-    // Hide the 3D view without unloading the splat (for the [depth]/[3D] toggle)
+    // Hide the 3D view without unloading the splat (for the [2D]/[3D] toggle)
     deactivate() {
       this.stopOscillation();
       if (this._glCanvas) this._glCanvas.style.display = 'none';
@@ -1294,6 +1313,12 @@ sharp predict -i your_image.jpg -o output/</pre>
           sharedMemoryForWorkers: false,
           renderer,
           camera,
+          // ml-sharp output tends toward small/tight gaussians; at the
+          // library default these rasterize as thin strips instead of
+          // smooth blobs on some scenes. Fattening the kernel and
+          // boosting focal adjustment fixes that (GaussianSplats3D docs).
+          kernel2DSize: PARAMS.splatKernelSize,
+          focalAdjustment: PARAMS.splatFocalAdjustment,
         });
       } catch (err) {
         if (this._glCanvas && this._glCanvas.parentElement) {
@@ -1643,7 +1668,7 @@ sharp predict -i your_image.jpg -o output/</pre>
   }
 
   // \u2500\u2500\u2500 SPLAT FILE LOADING (shared by upload handler and companion) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-  // The [depth]/[3D] toggle keeps both sources alive: splatSource holds the
+  // The [2D]/[3D] toggle keeps both sources alive: splatSource holds the
   // loaded splat while a depth-map view is showing, savedDepthSource holds the
   // depth-map source while the 3D view is showing.
   let splatSource = null;
@@ -1696,11 +1721,25 @@ sharp predict -i your_image.jpg -o output/</pre>
     });
   }
 
+  // Switching source (2D depth-map <-> 3D splat) always lands back on the
+  // [depth] content view — without this, the content toggle (paneView)
+  // goes stale: e.g. leave 3D while viewing [albedo], the depth map gets
+  // painted over it directly, but paneAlbedoBtn stays marked active and a
+  // click on it toggles OFF instead of back ON.
+  function resetPaneView() {
+    paneView = 'depth';
+    document.getElementById('paneDepthBtn').classList.add('active');
+    document.getElementById('paneAlbedoBtn').classList.remove('active');
+    document.getElementById('paneSpecBtn').classList.remove('active');
+    document.getElementById('paneNormalsBtn').classList.remove('active');
+  }
+
   function switchToDepthView() {
     if (!(activeDepthSource instanceof SplatDepthSource) || !savedDepthSource) return;
     activeDepthSource.deactivate();
     activeDepthSource = savedDepthSource;
     activeDepthSource.renderToPane(document.getElementById('depthCanvas'));
+    resetPaneView();
     if (depthFolder) depthFolder.hidden = !(activeDepthSource instanceof ImageDepthSource);
     if (splatFolder) splatFolder.hidden = true;
     if (flashFolder) flashFolder.hidden = false;
@@ -1717,6 +1756,7 @@ sharp predict -i your_image.jpg -o output/</pre>
     savedDepthLabel = document.getElementById('depthPaneLabel').textContent;
     activeDepthSource = splatSource;
     splatSource.reactivate();
+    resetPaneView();
     hidePreview();
     if (depthFolder) depthFolder.hidden = true;
     if (splatFolder) splatFolder.hidden = false;
@@ -2026,6 +2066,19 @@ sharp predict -i your_image.jpg -o output/</pre>
               : kind === 'specular' ? specularImageData
               : buildNormalsView();
     if (!img && kind !== 'depth') return;
+    // albedo/spec/normals live on the 2D depthCanvas, which the splat's GL
+    // canvas sits on top of and fully covers in 3D view. Toggle the splat's
+    // own canvas visibility directly — switchToDepthView() only swaps
+    // between depth-map SOURCES and silently no-ops when there's no saved
+    // depth source to swap back to (e.g. splat generated without ever
+    // running Generate Depth first).
+    if (activeDepthSource instanceof SplatDepthSource) {
+      if (kind === 'depth') {
+        activeDepthSource.reactivate();
+      } else {
+        activeDepthSource.deactivate();
+      }
+    }
     // Clicking the active view (or [depth]) returns to the depth map.
     paneView = (paneView === kind) ? 'depth' : kind;
     const canvas = document.getElementById('depthCanvas');
