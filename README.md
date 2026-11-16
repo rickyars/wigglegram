@@ -29,6 +29,10 @@ The companion server runs the big models on your GPU and gives the app two upgra
 
 ### Starting the companion server
 
+**Easiest:** double-click **`start-companion.bat`** in the project folder. A console window opens, and the app opens in your browser at http://127.0.0.1:8765/ once the server is listening (~20 s). Leave that window open while you work; close it to stop the server. If the companion is already running, the launcher just opens the app. It uses `D:\miniconda3\envs\comfyui\python.exe`; set the `WIGGLEGRAM_PYTHON` environment variable to point it at a different env.
+
+**From a terminal instead:**
+
 1. Open a terminal in this project folder
 2. Activate the Python environment that has ml-sharp installed. On this machine that's the `comfyui` conda env:
 
@@ -42,11 +46,30 @@ The companion server runs the big models on your GPU and gives the app two upgra
    python wigglegram-companion.py
    ```
 
-4. Wait for `Model ready. Listening on http://127.0.0.1:8765` (the very first start downloads the ~2.6GB SHARP checkpoint; after that it starts in seconds)
-5. Open (or reload) `wigglegram.html` — a **Generate Splat (ml-sharp)** button now appears under the upload buttons
+4. Wait for the `Listening on http://127.0.0.1:8765` log line (startup takes a few seconds; the SHARP model now loads on the first **Generate Splat** click instead, and the very first one downloads the ~2.6GB checkpoint)
+5. Open **http://127.0.0.1:8765/**. The companion serves `wigglegram.html` itself with no-cache headers, so a plain reload always picks up edits (no more Ctrl+Shift+R). Opening the file directly still works. A **Generate Splat (ml-sharp)** button appears under the upload buttons.
 6. Load a photo, click the button, wait ~10-60 seconds — the splat loads automatically
 
-Leave the terminal running while you use the app; the model stays warm so repeat generations are fast. Close it with Ctrl+C when you're done. If the button doesn't appear, the server isn't running (or wasn't up when the page loaded — reload the page).
+Leave the terminal running while you use the app. Between requests SHARP is parked in system RAM, not VRAM, because ComfyUI shares the GPU; moving it back takes a second or two. Close it with Ctrl+C when you're done. If the button doesn't appear, the server isn't running (or wasn't up when the page loaded — reload the page).
+
+### Harsh flash relight (Qwen-Image-Edit via ComfyUI)
+
+Most real wigglegrams were shot on Nimslo/Nishika-style cameras with a harsh on-camera flash. The **Relight: Harsh Flash (Qwen)** button redraws your photo with that flash look using **Qwen-Image-Edit 2511 + the Lightning 8-step LoRA** in the local ComfyUI (`127.0.0.1:8188`), then loads the result as the new source photo. Run depth or Generate Splat *after* it. A wigglegram camera fires one flash for every lens, so the light is fixed in the world, and relighting the source once, before any geometry, is physically right. Click again to re-roll (each click starts from the original photo with a new seed); **[original]** goes back.
+
+Requirements:
+- ComfyUI running with the Qwen-Image-Edit 2511 files (`qwen_image_edit_2511_fp8mixed`, `qwen_2.5_vl_7b_fp8_scaled`, `qwen_image_vae`, `Qwen-Image-Edit-2511-Lightning-8steps-V1.0-fp32`), all already installed on this machine.
+- The **attention-override** custom node (`ComfyUI/custom_nodes/attention-override/`). ComfyUI runs with `--use-sage-attention` for H3, and Qwen-Image renders black under sage. The node opts just the Qwen model back to PyTorch attention. ComfyUI only loads new nodes at startup, so restart it once after installing. The button only appears once `/health` reports `"flash": true`.
+- After each relight the companion asks ComfyUI to unload its models (`POST /free`) so SHARP, Marigold and the WebGL viewer get the VRAM back. That makes every relight a cold start, roughly 1-2 min.
+
+**light only** (checkbox, off by default) picks between two outputs:
+- **Off (default, `keep=color`):** Qwen's own relit image, which is the harshest, most convincing flash. Qwen works at ~1MP (softer when scaled back up) and the face can drift slightly. A colour safety net then runs: if Qwen kept less than 40% of the photo's colour (it once turned a colour photo black-and-white), the companion keeps Qwen's lightness and puts the photo's colours back (Lab: a/b from the photo, softened a little so Qwen's few-pixel drift doesn't fringe edges). Otherwise Qwen's output is returned untouched, because the restore slightly dulls a good result.
+- **On (`keep=photo`):** your original photo with only Qwen's *light* transferred: `photo × ratio`, where the ratio is relit/original brightness, smoothed with an edge-aware guided filter so the light change stops at the subject's outline. You get the exact face, full-resolution texture and the original toning, with Qwen's falloff and darkened room. It's subtler, because crisp face shadows and hot highlights are fine detail and the transfer drops them.
+
+`keep=none` (API only) returns raw Qwen with no colour check.
+
+Measured on `woman-in-chair_sml.png` (2026-11-11): ~45-65 s per click with ComfyUI already warm.
+
+The prompt lives in `FLASH_PROMPT` in `wigglegram-companion.py`. `POST /flash?prompt=...` overrides it for experiments. The first prompt asked for "crisp specular highlights on skin", which came out as a wet, sweaty sheen; Qwen also colorized the sepia test photo and added makeup. The next version said "a sepia or black-and-white photo stays sepia or black-and-white", which turned a colour photo black-and-white, so the current prompt only says to keep the photo's original colours, hues and saturation, plus matte skin. Never mention black-and-white in it.
 
 **First-time setup on a new machine** (already done on this one):
 
@@ -221,6 +244,7 @@ browser's WebGL splat viewer has room. ~1-2s warm total at 2048×1536.
 | Parameter | What you'll see | Technical |
 |-----------|----------------|-----------|
 | **Output Width** | Final GIF width in pixels. Smaller = faster encode, smaller file. Height scales proportionally. | Source image is downsampled to this width before frame generation. |
+| *(video export)* | MP4 export no longer plays in real time, and a background tab can't stretch its timing. | WebCodecs H.264 + `mp4-muxer@5.1.3` with exact per-frame timestamps; falls back to MediaRecorder if WebCodecs is unavailable. Odd widths/heights lose one pixel row/column (H.264 needs even sizes). |
 | **Invert Depth** | Flip what's "near" and "far." Check this if your depth map uses the opposite convention. | Applies `depth = 1 - depth` to the normalized depth map before all processing. |
 
 ## Effect Modes

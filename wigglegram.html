@@ -275,11 +275,64 @@
   .status.done { color: var(--green); }
   .status.error { color: var(--red); }
 
+  /* Busy indicator: a spinner on the working status line and on the button
+     whose job is running, so long companion jobs never look hung */
+  .status.working::before,
+  .upload-btn.busy::before {
+    content: '';
+    display: inline-block;
+    flex: none;
+    width: 0.7em;
+    height: 0.7em;
+    margin-right: 0.5em;
+    vertical-align: -0.05em;
+    border: 1.5px solid currentColor;
+    border-right-color: transparent;
+    border-radius: 50%;
+    animation: busy-spin 0.8s linear infinite;
+  }
+  .upload-btn.busy::before { margin-right: 0; }
+  .upload-btn.busy,
+  .upload-btn.busy:disabled {
+    border-color: var(--amber);
+    color: var(--amber);
+    cursor: progress;
+    opacity: 1;
+    pointer-events: none;
+  }
+  /* Other GPU/export buttons while a job runs: blocked without touching
+     .disabled, so code that enables a button mid-job (depth done ->
+     Generate) isn't undone when the job ends */
+  .busy-locked {
+    pointer-events: none;
+    opacity: 0.4;
+  }
+  @keyframes busy-spin { to { transform: rotate(360deg); } }
+
   .progress-track {
     width: 100%;
-    height: 1px;
+    height: 2px;
     background: var(--border);
     display: none;
+    overflow: hidden;
+  }
+  .progress-track.indeterminate .progress-fill {
+    width: 30% !important;
+    background: var(--amber);
+    box-shadow: 0 0 8px var(--amber);
+    animation: busy-slide 1.4s ease-in-out infinite;
+  }
+  @keyframes busy-slide {
+    from { transform: translateX(-100%); }
+    to { transform: translateX(340%); }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .status.working::before, .upload-btn.busy::before { animation-duration: 2.4s; }
+    .progress-track.indeterminate .progress-fill {
+      width: 100% !important;
+      animation: busy-pulse 1.6s ease-in-out infinite alternate;
+    }
+    @keyframes busy-pulse { from { opacity: 0.25; } to { opacity: 1; } }
   }
   .progress-track.visible { display: block; }
   .progress-fill {
@@ -405,6 +458,17 @@ sharp predict -i your_image.jpg -o output/</pre>
       <button class="upload-btn" id="companionBtn" style="display:none" onclick="generateSplatViaCompanion()">
         <span class="label-text">Generate Splat (ml-sharp)</span>
       </button>
+      <button class="upload-btn" id="flashRelightBtn" style="display:none" disabled onclick="flashRelightViaCompanion()">
+        <span class="label-text">Relight: Harsh Flash (Qwen)</span>
+      </button>
+      <!-- Outside the button: a link nested in a <button> is invalid and some
+           browsers deliver its click to the button (a re-roll, not a revert) -->
+      <a href="#" id="flashOriginalLink" class="clear-link" style="display:none; font-size:0.68rem; padding:0 0.25rem;"
+         onclick="revertFlashRelight(event)">[back to original photo]</a>
+      <label id="flashKeepRow" style="display:none; align-items:center; gap:0.4rem; font-size:0.68rem; color:var(--text-dim); cursor:pointer; padding:0 0.25rem;">
+        <input type="checkbox" id="flashKeepChk">
+        light only (subtler; keeps every pixel of your photo)
+      </label>
       <button class="upload-btn" id="intrinsicBtn" style="display:none" onclick="decomposeViaCompanion()">
         <span class="label-text">Decompose Lighting (Marigold)</span>
       </button>
@@ -1607,8 +1671,13 @@ sharp predict -i your_image.jpg -o output/</pre>
     if (statusEl) statusEl.textContent = 'Init error: ' + (initErr?.message || String(initErr));
   }
 
-  function loadSourceImage(file) {
+  function loadSourceImage(file, opts = {}) {
     srcFile = file;
+    // A flash-relit image keeps a handle on the photo it came from ([original]);
+    // any other load (a new upload, or the revert itself) forgets it.
+    flashOriginalFile = opts.flashOf || null;
+    document.getElementById('flashOriginalLink').style.display = flashOriginalFile ? '' : 'none';
+    document.getElementById('flashRelightBtn').disabled = false;
     const img = new Image();
     img.onload = () => {
       try {
@@ -1775,6 +1844,117 @@ sharp predict -i your_image.jpg -o output/</pre>
   let companionBusy = false;
   let companionAvailable = false;
 
+  // ─── BUSY INDICATOR ────────────────────────────────────────────────────────
+  // Long jobs (Qwen relight ~1 min, SHARP splat, Marigold) used to show one
+  // static line and look hung. startBusy() puts a spinner + elapsed seconds on
+  // the clicked button and the status line, runs the progress bar (real
+  // steps when the companion reports them, otherwise indeterminate), and
+  // polls the companion's GET /progress for the current stage.
+  const BUSY_BUTTONS = ['genDepthBtn', 'companionBtn', 'flashRelightBtn', 'intrinsicBtn', 'generateBtn'];
+  let activeBusy = null;
+
+  function fmtElapsed(secs) {
+    return secs < 60 ? secs + 's' : Math.floor(secs / 60) + 'm' + String(secs % 60).padStart(2, '0') + 's';
+  }
+
+  function startBusy(btn, label, opts = {}) {
+    const t0 = performance.now();
+    const lbl = btn && btn.querySelector('.label-text');
+    const origLabel = lbl ? lbl.textContent : '';
+    const statusEl = document.getElementById('status');
+    const track = document.getElementById('progressTrack');
+    const fill = document.getElementById('progressFill');
+    let stage = opts.stage || 'starting', step = 0, total = 0;
+    let lastWritten = null, alive = true, polling = !!opts.task;
+
+    // Lock every GPU/export button for the duration (class only, see .busy-locked)
+    for (const id of BUSY_BUTTONS) {
+      const b = document.getElementById(id);
+      if (b && b !== btn) b.classList.add('busy-locked');
+    }
+    if (btn) btn.classList.add('busy');
+
+    function render() {
+      if (!alive) return;
+      const t = fmtElapsed(Math.round((performance.now() - t0) / 1000));
+      if (lbl) lbl.textContent = label + '… ' + t;
+      const steps = total > 0 ? ' ' + step + '/' + total : '';
+      const expect = opts.expect ? '  (usually ' + opts.expect + ')' : '';
+      const msg = label.toLowerCase() + '  ·  ' + stage + steps + '  ·  ' + t + expect;
+      // Don't stomp a message someone else wrote mid-job (e.g. a download %)
+      if (lastWritten === null || statusEl.textContent === lastWritten) {
+        setStatus(msg, 'working');
+        lastWritten = msg;
+      }
+      track.classList.add('visible');
+      if (total > 0) {
+        track.classList.remove('indeterminate');
+        fill.style.width = Math.round(100 * step / total) + '%';
+      } else {
+        track.classList.add('indeterminate');
+      }
+    }
+
+    async function poll() {
+      if (!polling) return render();
+      try {
+        const p = await (await fetch(COMPANION_URL + '/progress', { cache: 'no-store' })).json();
+        if (!alive) return;
+        if (p.task === opts.task) {
+          stage = p.stage || stage; step = p.step || 0; total = p.total || 0;
+        } else if (p.task) {
+          stage = 'waiting for the GPU (' + p.task + ' running)'; step = total = 0;
+        } else {
+          stage = 'sending to companion'; step = total = 0;
+        }
+      } catch (e) { /* older companion without /progress: elapsed time still ticks */ }
+      render();
+    }
+
+    const timer = setInterval(opts.task ? poll : render, 1000);
+    render();
+    const busy = {
+      // Update the stage from page code (in-browser depth, model download).
+      // Page-reported stages take over from companion polling.
+      stage(text, s = 0, n = 0, fromCompanion = false) {
+        stage = text; step = s; total = n;
+        polling = fromCompanion && !!opts.task;
+        lastWritten = null;  // reclaim the status line
+        render();
+      },
+      stop() {
+        if (!alive) return;
+        alive = false;
+        clearInterval(timer);
+        if (lbl) lbl.textContent = origLabel;
+        if (btn) btn.classList.remove('busy');
+        for (const id of BUSY_BUTTONS) {
+          const b = document.getElementById(id);
+          if (b) b.classList.remove('busy-locked');
+        }
+        track.classList.remove('indeterminate');
+        setProgress(-1);
+        if (activeBusy === busy) activeBusy = null;
+      },
+    };
+    activeBusy = busy;
+    return busy;
+  }
+
+  // Companion jobs take up to minutes and the upload input stays live, so a
+  // result is only applied if the photo it was made from is still loaded
+  function stillCurrent(startedWith, what) {
+    if (srcFile === startedWith) return true;
+    setStatus(what + ' finished, but a different photo is loaded now — result discarded', 'error');
+    return false;
+  }
+
+  // Report a stage to the running busy indicator, or fall back to the status line
+  function busyStage(text, step = 0, total = 0) {
+    if (activeBusy) activeBusy.stage(text, step, total);
+    else setStatus(text + (total ? ' ' + step + '/' + total : ''), 'working');
+  }
+
   (async function detectCompanion() {
     // Two attempts with a generous timeout: the companion can be slow to
     // answer right after startup or while another request holds the GPU.
@@ -1789,6 +1969,22 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (info.ok) {
         companionAvailable = true;
         document.getElementById('companionBtn').style.display = '';
+        const showFlash = () => {
+          document.getElementById('flashRelightBtn').style.display = '';
+          document.getElementById('flashKeepRow').style.display = 'flex';
+        };
+        if (info.flash) {
+          showFlash();
+        } else {
+          // ComfyUI not up (yet): keep checking so starting it later shows
+          // the flash button without a page reload
+          const flashPoll = setInterval(async () => {
+            try {
+              const h = await (await fetch(COMPANION_URL + '/health', { cache: 'no-store' })).json();
+              if (h.flash) { clearInterval(flashPoll); showFlash(); }
+            } catch (e) { /* companion went away; keep trying quietly */ }
+          }, 15000);
+        }
         if (info.intrinsic) {
           document.getElementById('intrinsicBtn').style.display = '';
           document.getElementById('intrinsicHQRow').style.display = 'flex';
@@ -1827,10 +2023,9 @@ sharp predict -i your_image.jpg -o output/</pre>
       return;
     }
     companionBusy = true;
-    const btn = document.getElementById('companionBtn');
-    btn.disabled = true;
-    btn.querySelector('.label-text').textContent = 'Generating splat... (~1 min)';
-    setStatus('generating splat via ml-sharp...', 'working');
+    const busy = startBusy(document.getElementById('companionBtn'), 'Generating splat',
+      { task: 'predict', expect: '~1 min' });
+    const startedWith = srcFile;
     try {
       // The splat is always built from the ORIGINAL photo. Relighting works
       // by shading RATIO (newShade / oldShade) in the compositor, which
@@ -1847,16 +2042,70 @@ sharp predict -i your_image.jpg -o output/</pre>
         throw new Error(msg);
       }
       const blob = await resp.blob();
+      busy.stop();
+      if (!stillCurrent(startedWith, 'splat')) return;
       const baseName = srcFile.name.replace(/\.[^.]+$/, '');
       loadSplatFile(new File([blob], baseName + '.ply'));
     } catch (err) {
       console.error('companion splat generation failed:', err);
+      busy.stop();
       setStatus('splat generation failed: ' + err.message, 'error');
     } finally {
       companionBusy = false;
-      btn.disabled = false;
-      btn.querySelector('.label-text').textContent = 'Generate Splat (ml-sharp)';
+      busy.stop();
     }
+  };
+
+  // Companion flash relight: Qwen-Image-Edit 2511 (in the local ComfyUI)
+  // redraws the photo as if shot with a harsh on-camera flash. Done ONCE on
+  // the source, before depth/splat: a wigglegram camera fires one flash for
+  // all lenses, so the light is fixed in the world and every view shares it.
+  let flashOriginalFile = null;
+
+  window.flashRelightViaCompanion = async function() {
+    if (!srcFile || companionBusy) {
+      if (!srcFile) setStatus('load a source image first', 'error');
+      return;
+    }
+    companionBusy = true;
+    const busy = startBusy(document.getElementById('flashRelightBtn'), 'Relighting',
+      { task: 'flash', expect: '~1 min, longer on a cold start' });
+    const startedWith = srcFile;
+    const original = flashOriginalFile || srcFile;  // re-rolls always start from the real photo
+    try {
+      const seed = 1 + Math.floor(Math.random() * 1e6);
+      // Default: Qwen's flash light + the photo's own colors (Qwen sometimes
+      // drains or shifts color). Checked: only Qwen's soft light on the photo.
+      const keep = document.getElementById('flashKeepChk').checked ? 'photo' : 'color';
+      const resp = await fetch(COMPANION_URL + '/flash?seed=' + seed + '&keep=' + keep, {
+        method: 'POST',
+        headers: { 'Content-Type': original.type || 'image/jpeg' },
+        body: original,
+      });
+      if (!resp.ok) {
+        let msg = 'companion error ' + resp.status;
+        try { msg = (await resp.json()).error || msg; } catch (e2) {}
+        throw new Error(msg);
+      }
+      const blob = await resp.blob();
+      busy.stop();
+      if (!stillCurrent(startedWith, 'relight')) return;
+      const baseName = original.name.replace(/\.[^.]+$/, '');
+      loadSourceImage(new File([blob], baseName + '-flash-s' + seed + '.png', { type: 'image/png' }), { flashOf: original });
+    } catch (err) {
+      console.error('flash relight failed:', err);
+      busy.stop();
+      setStatus('flash relight failed: ' + err.message, 'error');
+    } finally {
+      companionBusy = false;
+      busy.stop();
+    }
+  };
+
+  window.revertFlashRelight = function(e) {
+    e.preventDefault();
+    e.stopPropagation();
+    if (flashOriginalFile && !companionBusy) loadSourceImage(flashOriginalFile);
   };
 
   // Companion Marigold: decompose the source photo into albedo + specular +
@@ -1867,11 +2116,10 @@ sharp predict -i your_image.jpg -o output/</pre>
       return;
     }
     companionBusy = true;
-    const btn = document.getElementById('intrinsicBtn');
-    btn.disabled = true;
-    btn.querySelector('.label-text').textContent = PARAMS.intrinsicHQ
-      ? 'Decomposing HQ... (~60s)' : 'Decomposing... (~10s)';
-    setStatus('decomposing lighting (Marigold)...', 'working');
+    const busy = startBusy(document.getElementById('intrinsicBtn'),
+      PARAMS.intrinsicHQ ? 'Decomposing (HQ)' : 'Decomposing',
+      { task: 'intrinsic', expect: PARAMS.intrinsicHQ ? '~60s' : '~10s warm' });
+    const startedWith = srcFile;
     try {
       const resp = await fetch(COMPANION_URL + '/intrinsic' + (PARAMS.intrinsicHQ ? '?hq=1' : ''), {
         method: 'POST',
@@ -1884,6 +2132,7 @@ sharp predict -i your_image.jpg -o output/</pre>
         throw new Error(msg);
       }
       const data = await resp.json();
+      if (!stillCurrent(startedWith, 'decomposition')) { busy.stop(); return; }
       const toImageData = async (b64) => {
         const bin = atob(b64);
         const bytes = new Uint8Array(bin.length);
@@ -1913,15 +2162,16 @@ sharp predict -i your_image.jpg -o output/</pre>
       if (relightFolder) relightFolder.hidden = false;
       PARAMS.relightEnabled = true;
       document.getElementById('intrinsicToggle').classList.add('visible');
+      busy.stop();
       setStatus('decomposition ready \u2014 Relight controls unlocked', 'done');
       schedulePreviewRebuild();
     } catch (err) {
       console.error('intrinsic decomposition failed:', err);
+      busy.stop();
       setStatus('decomposition failed: ' + err.message, 'error');
     } finally {
       companionBusy = false;
-      btn.disabled = false;
-      btn.querySelector('.label-text').textContent = 'Decompose Lighting (Marigold)';
+      busy.stop();
     }
   };
 
@@ -1939,7 +2189,7 @@ sharp predict -i your_image.jpg -o output/</pre>
       dtype: hasWebGPU ? 'fp16' : 'q8',
       progress_callback: (p) => {
         if (p.status === 'progress' && p.file && p.file.endsWith('.onnx')) {
-          setStatus('downloading depth model  ' + Math.round(p.progress) + '%', 'working');
+          busyStage('downloading depth model (first run only)  ' + Math.round(p.progress) + '%', Math.round(p.progress), 100);
         }
       },
     });
@@ -1955,7 +2205,6 @@ sharp predict -i your_image.jpg -o output/</pre>
     // Prefer companion Marigold depth (much better quality than the in-browser model)
     if (companionAvailable) {
       try {
-        setStatus('estimating depth (Marigold)...', 'working');
         const depthImg = await companionDepth(srcCanvas);
         if (requestId !== depthRequestId || activeDepthSource !== forSource) return;
         applyEstimatedDepth(depthImg, 'depth (Marigold)');
@@ -1967,10 +2216,11 @@ sharp predict -i your_image.jpg -o output/</pre>
     }
 
     try {
+      busyStage(depthEstimator ? 'in-browser model (Depth Anything V2)' : 'loading in-browser depth model');
       const estimator = await getDepthEstimator();
       if (requestId !== depthRequestId) return;
 
-      setStatus('estimating depth (AI)...', 'working');
+      busyStage('in-browser model (Depth Anything V2)');
       const blob = await new Promise(r => srcCanvas.toBlob(r, 'image/png'));
       const blobUrl = URL.createObjectURL(blob);
       let result;
@@ -2019,8 +2269,11 @@ sharp predict -i your_image.jpg -o output/</pre>
   // Manual trigger for depth estimation (replaces the old auto-run on load)
   window.generateDepth = function() {
     if (!srcImageData) return;
+    if (activeBusy) return;       // a GPU job is running; buttons are locked anyway
     depthEstimatorFailed = false; // clicking again is an explicit retry
-    estimateAIDepth(document.getElementById('srcCanvas'));
+    const busy = startBusy(document.getElementById('genDepthBtn'), 'Estimating depth',
+      companionAvailable ? { task: 'depth', expect: '~10s warm, longer on first load' } : { stage: 'starting' });
+    estimateAIDepth(document.getElementById('srcCanvas')).finally(() => busy.stop());
   };
 
   // ─── DECOMPOSITION PANE VIEWS ([albedo]/[spec] toggle on the depth pane) ───
@@ -3084,8 +3337,88 @@ sharp predict -i your_image.jpg -o output/</pre>
     gif.render();
   }
 
-  // \u2500\u2500\u2500 VIDEO ENCODING (MediaRecorder over a canvas stream) \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // \u2500\u2500\u2500 VIDEO ENCODING \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
+  // Preferred: WebCodecs H.264 + mp4-muxer. Every frame gets an exact
+  // timestamp, so encoding runs as fast as the encoder allows and a hidden or
+  // backgrounded tab can no longer stretch the timing (the MediaRecorder path
+  // records in real time and Chrome throttles timers in background tabs).
   async function encodeVideo(frames, width, height, frameDelay) {
+    if (window.VideoEncoder && window.VideoFrame) {
+      try {
+        return await encodeVideoWebCodecs(frames, width, height, frameDelay);
+      } catch (err) {
+        console.warn('WebCodecs encode failed, falling back to MediaRecorder:', err);
+      }
+    }
+    return encodeVideoMediaRecorder(frames, width, height, frameDelay);
+  }
+
+  async function encodeVideoWebCodecs(frames, width, height, frameDelay) {
+    const { Muxer, ArrayBufferTarget } = await import('https://cdn.jsdelivr.net/npm/mp4-muxer@5.1.3/+esm');
+    // H.264 needs even dimensions: drop a trailing odd row/column
+    const w = width & ~1, h = height & ~1;
+    const fps = 1000 / frameDelay;
+    const base = { width: w, height: h, bitrate: 8_000_000, framerate: fps };
+    // High / Main / Baseline at level 5.1 (covers 4K), then a conservative baseline 3.1
+    let config = null;
+    for (const codec of ['avc1.640033', 'avc1.4d0033', 'avc1.420033', 'avc1.42001f']) {
+      const support = await VideoEncoder.isConfigSupported({ ...base, codec });
+      if (support.supported) { config = support.config; break; }
+    }
+    if (!config) throw new Error('no supported H.264 encoder config for ' + w + '\u00d7' + h);
+
+    const muxer = new Muxer({
+      target: new ArrayBufferTarget(),
+      video: { codec: 'avc', width: w, height: h, frameRate: fps },
+      fastStart: 'in-memory',
+    });
+    let encodeError = null;
+    let wakeOnError = null;
+    const encoder = new VideoEncoder({
+      output: (chunk, meta) => muxer.addVideoChunk(chunk, meta),
+      error: e => { encodeError = e; if (wakeOnError) wakeOnError(); },
+    });
+    try {
+      encoder.configure(config);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+
+      // Same length rule as before: loop the cycle for a ~3s+ clip (many
+      // players and feeds don't loop short videos on their own)
+      const loopMs = frames.length * frameDelay;
+      const loops = Math.max(3, Math.ceil(3000 / loopMs));
+      const totalFrames = loops * frames.length;
+      const durUs = Math.round(frameDelay * 1000);
+      for (let i = 0; i < totalFrames; i++) {
+        if (encodeError) throw encodeError;
+        ctx.putImageData(frames[i % frames.length], 0, 0);
+        const vf = new VideoFrame(canvas, { timestamp: i * durUs, duration: durUs });
+        encoder.encode(vf, { keyFrame: i % frames.length === 0 });
+        vf.close();
+        // Backpressure: wait for the encoder to drain (not a timer, which
+        // background tabs throttle to 1s) before queueing more
+        while (encoder.encodeQueueSize > 8 && !encodeError) {
+          await new Promise(r => {
+            wakeOnError = r;
+            encoder.addEventListener('dequeue', r, { once: true });
+          });
+        }
+        setProgress(50 + Math.round((i / totalFrames) * 50));
+      }
+      await encoder.flush();
+      if (encodeError) throw encodeError;
+    } finally {
+      if (encoder.state !== 'closed') encoder.close();
+    }
+    muxer.finalize();
+    return { blob: new Blob([muxer.target.buffer], { type: 'video/mp4' }), extension: 'mp4' };
+  }
+
+  // Fallback: MediaRecorder over a canvas stream (records in real time)
+  async function encodeVideoMediaRecorder(frames, width, height, frameDelay) {
     const candidates = [
       { mime: 'video/mp4;codecs=avc1.42E01E', extension: 'mp4' },
       { mime: 'video/webm;codecs=vp9', extension: 'webm' },
@@ -3131,6 +3464,8 @@ sharp predict -i your_image.jpg -o output/</pre>
   }
 
   window.generate = async function() {
+    // The busy indicator owns the status line and progress bar during a GPU job
+    if (activeBusy) return;
     await runPipeline(PARAMS.outputWidth);
   };
 </script>
